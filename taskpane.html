@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Send to Wunderbuild</title>
+<script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+<style>
+  :root{--ink:#1d2b28;--muted:#5d6b68;--line:#d5dcda;--bg:#fff;--soft:#f3f6f5;--accent:#0f5c4d;--bad:#a4262c;--ok:#0f5c4d}
+  @media (prefers-color-scheme:dark){:root{--ink:#e8efed;--muted:#9fb0ac;--line:#33423f;--bg:#1b2220;--soft:#232d2a;--accent:#4fb89f;--bad:#f1707b;--ok:#4fb89f}}
+  *{box-sizing:border-box}
+  body{margin:0;padding:14px;font:14px/1.45 "Segoe UI",system-ui,sans-serif;color:var(--ink);background:var(--bg)}
+  h1{font-size:16px;margin:0 0 12px}
+  label{display:block;font-weight:600;margin:14px 0 4px}
+  input,select{width:100%;padding:7px 8px;font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:4px}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+  details{border:1px solid var(--line);border-radius:4px;padding:6px 8px}
+  summary{cursor:pointer;color:var(--muted)}
+  #jobs{list-style:none;margin:6px 0 0;padding:0;max-height:150px;overflow:auto;border:1px solid var(--line);border-radius:4px}
+  #jobs:empty{display:none}
+  #jobs button{display:block;width:100%;text-align:left;padding:7px 8px;border:0;border-bottom:1px solid var(--line);background:none;color:var(--ink);font:inherit;cursor:pointer}
+  #jobs li:last-child button{border-bottom:0}
+  #jobs button:hover,#jobs button[aria-pressed=true]{background:var(--soft)}
+  #jobs small{display:block;color:var(--muted)}
+  #chosen{margin-top:6px;color:var(--accent);font-weight:600}
+  #send{width:100%;margin-top:16px;padding:9px;border:0;border-radius:4px;background:var(--accent);color:#fff;font:600 14px "Segoe UI",system-ui,sans-serif;cursor:pointer}
+  @media (prefers-color-scheme:dark){#send{color:#0b1412}}
+  #send:disabled{opacity:.5;cursor:default}
+  #status{margin-top:10px;min-height:1.4em}
+  #status.err{color:var(--bad)} #status.ok{color:var(--ok)}
+</style>
+</head>
+<body>
+<h1>Send to Wunderbuild</h1>
+
+<details id="settings">
+  <summary>API settings</summary>
+  <label for="key">API key</label>
+  <input id="key" type="password" autocomplete="off" placeholder="Paste your Wunderbuild API key">
+  <label for="base">API base URL</label>
+  <input id="base" type="url" value="https://api.wunderbuild.com/api">
+</details>
+
+<label for="q">Job</label>
+<input id="q" type="search" placeholder="Search by job name, number or address">
+<ul id="jobs"></ul>
+<div id="chosen"></div>
+
+<label for="folder">Folder</label>
+<select id="folder" disabled><option value="">Choose a job first</option></select>
+
+<label for="name">File name</label>
+<input id="name" type="text">
+
+<button id="send" disabled>Send to Wunderbuild</button>
+<div id="status" role="status" aria-live="polite"></div>
+
+<script src="taskpane.js"></script>
+</body>
+</html>
