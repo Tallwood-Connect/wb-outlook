@@ -20,8 +20,8 @@ async function api(path, opts = {}) {
       ...opts,
       headers: { "x-api-key": key, "Content-Type": "application/json", ...(opts.headers || {}) },
     });
-  } catch {
-    throw new Error("Could not reach Wunderbuild. This is usually a CORS block, so a small proxy may be needed.");
+  } catch (err) {
+    throw new Error(`Request to ${base()}${path.split("?")[0]} was blocked or failed (${err && err.message}). Check the API base URL and the proxy settings.`);
   }
   if (!res.ok) throw new Error(`Wunderbuild returned ${res.status}: ${(await res.text()).slice(0, 200)}`);
   return res.status === 204 ? null : res.json();
