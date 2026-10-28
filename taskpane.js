@@ -69,7 +69,7 @@ async function loadFolders() {
   sel.innerHTML = "";
   sel.add(new Option("Job documents (top level)", ""));
   try {
-    const root = await api(`/documents/JOB/${job._id}/folders`);
+    const root = await api(`/documents/job/${job._id}/folders`);
     const walk = (folders, prefix) => {
       for (const f of folders || []) {
         sel.add(new Option(prefix + f.name, f._id));
@@ -123,7 +123,7 @@ $("send").addEventListener("click", async () => {
     const folderId = $("folder").value;
 
     setStatus("Creating document in Wunderbuild…");
-    const doc = await api(`/documents/JOB/${job._id}`, {
+    const doc = await api(`/documents/job/${job._id}`, {
       method: "POST",
       body: JSON.stringify({ name, type, size: bytes.length, ...(folderId ? { folderId } : {}) }),
     });
@@ -146,7 +146,7 @@ $("send").addEventListener("click", async () => {
     if (!put.ok) throw new Error(`Upload failed (${put.status}).`);
     setStatus(`Saved to ${job.name}.`, "ok");
   } catch (e) {
-    if (docId) { try { await api(`/documents/JOB/${job._id}/${docId}`, { method: "DELETE" }); } catch { /* best effort */ } }
+    if (docId) { try { await api(`/documents/job/${job._id}/${docId}`, { method: "DELETE" }); } catch { /* best effort */ } }
     setStatus(e.message, "err");
   }
   refreshSend();
