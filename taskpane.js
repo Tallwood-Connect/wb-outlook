@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.2"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.15"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -269,6 +269,52 @@ function emailMeta() {
   ];
 }
 
+/* ---------- formatted PDF (rendered by the Cloudflare Worker) ---------- */
+function getBodyHtml() {
+  return new Promise((resolve, reject) =>
+    Office.context.mailbox.item.body.getAsync(Office.CoercionType.Html, (r) =>
+      r.status === Office.AsyncResultStatus.Succeeded ? resolve(r.value) : reject(new Error(r.error.message))));
+}
+function bytesToB64(bytes) {
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+const escHtml = (t) => String(t == null ? "" : t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+// Email header block + the email's own HTML. Scripts are removed, and inline (cid:) images are embedded.
+function buildEmailHtml({ subject, meta, bodyHtml, cid }) {
+  let body = String(bodyHtml || "").replace(/<script[\s\S]*?<\/script>/gi, "");
+  body = body.replace(/cid:([^"'\s)>]+)/gi, (m, id) => (cid && cid.get(id.split("@")[0].toLowerCase())) || m);
+  const rows = meta.filter(([, v]) => v).map(([k, v]) =>
+    `<tr><td style="padding:1px 10px 1px 0;font-weight:bold;vertical-align:top;white-space:nowrap">${escHtml(k)}</td><td style="padding:1px 0">${escHtml(v)}</td></tr>`).join("");
+  return `<!doctype html><html><head><meta charset="utf-8">` +
+    `<meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none'"></head><body style="margin:0">` +
+    `<div style="font:13px Arial,Helvetica,sans-serif;color:#000;border-bottom:1px solid #999;padding-bottom:10px;margin-bottom:14px">` +
+    `<div style="font-size:18px;font-weight:bold;margin-bottom:8px">${escHtml(subject || "(No subject)")}</div><table style="border-collapse:collapse">${rows}</table></div>` +
+    `<div>${body}</div></body></html>`;
+}
+
+async function renderPdf(html) {
+  const b = base();
+  if (/\/\/api\.wunderbuild\.com/i.test(b)) throw new Error("no Worker proxy in the API base URL");
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 60000);
+  try {
+    let res;
+    try {
+      res = await fetch(b.replace(/\/api$/, "") + "/pdf", {
+        method: "POST", signal: ctl.signal,
+        headers: { "x-api-key": $("key").value.trim(), "Content-Type": "application/json" },
+        body: JSON.stringify({ html }),
+      });
+    } catch (e) { throw new Error(e.name === "AbortError" ? "timed out" : "could not reach the Worker"); }
+    if (!res.ok) throw new Error((await res.text()).slice(0, 160) || `status ${res.status}`);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (String.fromCharCode(...bytes.slice(0, 4)) !== "%PDF") throw new Error("the reply was not a PDF");
+    return bytes;
+  } finally { clearTimeout(timer); }
+}
+
 /* ---------- attachments ---------- */
 let currentAtts = [];
 function renderAttachments() {
@@ -400,10 +446,24 @@ $("send").addEventListener("click", async () => {
     // Read everything from the open email first, in one go, so clicking another email cannot mix things up.
     setStatus("Reading email…", "busy");
     const item = Office.context.mailbox.item, subject = item.subject, meta = emailMeta();
+    const useFmt = $("fmtPdf").checked;
     const reads = atts.map(({ att, typed }) => getAttachment(att).then((f) => ({ att, typed, f }), (e) => ({ att, e })));
-    const [bodyText, emlB64, ...got] = await Promise.all([getBodyText(), getEml(), ...reads]);
-    const pdf = emailToPdf({ subject, meta, body: bodyText });
+    const inlineAtts = (item.attachments || []).filter((a) => a.isInline && (a.contentType || "").startsWith("image/") && (a.size || 0) < 5 * 1024 * 1024);
+    const inlineReads = useFmt ? inlineAtts.map((a) => getAttachment(a).then((f) => ({ a, f }), () => null)) : [];
+    const [bodyText, emlB64, bodyHtml, ...rest] = await Promise.all([getBodyText(), getEml(), useFmt ? getBodyHtml() : Promise.resolve(""), ...reads, ...inlineReads]);
+    const got = rest.slice(0, reads.length), inl = rest.slice(reads.length);
     const eml = b64ToBytes(emlB64);
+
+    let pdf = null;
+    if (useFmt) {
+      try {
+        setStatus("Rendering formatted PDF…", "busy");
+        const cid = new Map();
+        for (const r of inl) if (r && r.f) cid.set((r.a.name || "").toLowerCase(), `data:${r.f.type};base64,${bytesToB64(r.f.bytes)}`);
+        pdf = await renderPdf(buildEmailHtml({ subject, meta, bodyHtml, cid }));
+      } catch (e) { problems.push(`formatted PDF unavailable (${e.message}), so a basic text PDF was saved instead`); }
+    }
+    if (!pdf) pdf = emailToPdf({ subject, meta, body: bodyText });
 
     setStatus("Saving PDF…", "busy");
     await uploadFile(`${baseName}.pdf`, "application/pdf", pdf, folderId);
@@ -450,12 +510,14 @@ function refreshForItem(keepStatus) {
 /* ---------- init ---------- */
 $("name").addEventListener("input", refreshSend);
 ["key", "base"].forEach((id) => $(id).addEventListener("change", () => store.set("wb_" + id, $(id).value.trim())));
+$("fmtPdf").addEventListener("change", () => store.set("wb_fmtpdf", $("fmtPdf").checked ? "1" : "0"));
 
 Office.onReady(async () => {
   const ver = $("ver");
   ver.textContent = `v${APP_VERSION}` + (ver.dataset.v === APP_VERSION ? "" : ` (taskpane.html is v${ver.dataset.v}, files out of sync)`);
   $("key").value = store.get("wb_key") || "";
   $("base").value = store.get("wb_base") || DEFAULT_BASE;
+  $("fmtPdf").checked = store.get("wb_fmtpdf") !== "0";
   if (!$("key").value) $("settings").open = true;
   $("name").value = suggestName();
   renderAttachments();
