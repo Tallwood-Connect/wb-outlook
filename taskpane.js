@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.1"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.2"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -153,7 +153,7 @@ async function autoMatch() {
     const [top, second] = m;
     if (top.s >= 75 && (!second || top.s - second.s >= 15)) {
       if (!job || job._id !== top.j._id) await chooseJob(top.j);
-      note.textContent = "Job filled in from the email subject. Check it is correct.";
+      $("autoNote").textContent = "Job filled in from the email subject. Check it is correct.";
     } else {
       renderJobList(m.slice(0, 3).map((x) => x.j));
       note.textContent = "Possible jobs from the subject. Pick one:";
@@ -166,6 +166,9 @@ function clearJob() {
   job = null;
   folderRun++; searchRun++;
   $("chosen").textContent = "";
+  $("matchNote").className = ""; $("matchNote").textContent = "";
+  $("autoNote").textContent = "";
+  $("corrNote").hidden = true;
   $("jobs").textContent = "";
   $("q").value = "";
   for (const id of ["folder", "attFolder"]) {
@@ -179,6 +182,9 @@ function clearJob() {
 
 async function chooseJob(j) {
   job = j;
+  matchRun++; // cancel any matching still running for this email
+  $("matchNote").className = ""; $("matchNote").textContent = "";
+  $("autoNote").textContent = "";
   $("jobs").textContent = "";
   $("q").value = "";
   $("chosen").textContent = `Job: ${j.jobNumber ? "#" + j.jobNumber + " " : ""}${j.name}`;
@@ -195,6 +201,7 @@ async function loadFolders() {
   sel.innerHTML = ""; af.innerHTML = "";
   sel.add(new Option("Loading folders…", ""));
   setStatus("Loading folders…", "busy");
+  $("corrNote").hidden = true;
   let root = null, failed = null;
   try { root = await api(`/documents/job/${job._id}/folders`); } catch (e) { failed = e; }
   if (run !== folderRun) return; // another job was picked meanwhile
@@ -207,6 +214,7 @@ async function loadFolders() {
   // Emails default to Correspondence (also matched when nested, e.g. "Admin / Correspondence").
   const corr = [...sel.options].find((o) => /(^|\/ )correspondence$/i.test(o.text.trim()));
   if (corr) sel.value = corr.value;
+  $("corrNote").hidden = !!corr || !!failed; // only claim it is missing when the folder list loaded fine
   for (const o of sel.options) af.add(new Option(o.text, o.value));
   // Attachments default to "Working Documents"; otherwise the email's folder.
   const work = [...af.options].find((o) => /(^|\/ )working documents$/i.test(o.text.trim()));
@@ -356,9 +364,24 @@ async function ensureOutlookFolder(parentId) {
   return created._id;
 }
 
+$("corrBtn").addEventListener("click", async () => {
+  const forJob = job;
+  if (!forJob || sending) return;
+  const btn = $("corrBtn");
+  btn.disabled = true;
+  try {
+    setStatus("Creating Correspondence folder…", "busy");
+    await api(`/documents/job/${forJob._id}/folders`, { method: "POST", body: JSON.stringify({ name: "Correspondence" }) });
+    if (job !== forJob) return; // a different job was picked meanwhile
+    await loadFolders();
+    setStatus("Correspondence folder created.", "ok");
+  } catch (e) { setStatus(e.message, "err"); }
+  btn.disabled = false;
+});
+
 let sending = false, pendingRefresh = false;
 function lockUI(on) {
-  $("q").disabled = on; $("name").disabled = on;
+  $("q").disabled = on; $("name").disabled = on; $("corrBtn").disabled = on;
   $("folder").disabled = on || !job; $("attFolder").disabled = on || !job;
   for (const el of $("attList").querySelectorAll("input")) el.disabled = on;
   for (const el of $("jobs").querySelectorAll("button")) el.disabled = on;
