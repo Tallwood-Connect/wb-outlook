@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.17"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.18"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -239,6 +239,7 @@ function clearJob() {
   $("autoNote").textContent = "";
   $("corrNote").hidden = true;
   $("savedNote").textContent = "";
+  resetDup();
   $("jobs").textContent = "";
   $("q").value = "";
   for (const id of ["folder", "attFolder"]) {
@@ -292,6 +293,7 @@ async function loadFolders() {
   sel.disabled = false; af.disabled = false;
   if (failed) setStatus(failed.message, "err"); else setStatus("");
   refreshSend();
+  if (!failed) checkDuplicate();
 }
 
 /* ---------- email -> .eml ---------- */
@@ -385,6 +387,64 @@ async function renderPdf(html) {
   } finally { clearTimeout(timer); }
 }
 
+/* ---------- unique reference ID and duplicate check ---------- */
+// A short ID derived from the email's own message ID, so the same email gets the same ID for everyone.
+// Small non-cryptographic hash (cyrb53 style): gives the same result in every browser, with no extra libraries.
+function hash40(str) {
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return ((h2 >>> 0).toString(16).padStart(8, "0") + (h1 >>> 0).toString(16).padStart(8, "0")).slice(0, 10);
+}
+async function emailId(item) {
+  // Runs straight away (no waiting), so it reads the email that is open right now.
+  return hash40((item.internetMessageId
+    ? String(item.internetMessageId).trim()
+    : [fmtAddr(item.from), item.dateTimeCreated ? new Date(item.dateTimeCreated).toISOString() : "", item.subject || ""].join("|")
+  ).toLowerCase());
+}
+
+async function listDocs(jobId, folderId) {
+  const out = [];
+  for (let page = 1; page <= 5; page++) {
+    const d = await api(`/documents/job/${jobId}?page=${page}&limit=100${folderId ? `&folderId=${folderId}` : ""}`);
+    out.push(...(d.result || []).filter((x) => !x.isDeleted));
+    if (!d.pagination || !d.pagination.hasNextPage) break;
+  }
+  return out;
+}
+
+// Looks in the folder the email will be saved to, and in Correspondence, plus each one's "Outlook Files" folder.
+async function findExisting(forJob, destFolderId, id) {
+  const corr = [...$("folder").options].find((o) => /(^|\/ )correspondence$/i.test(o.text.trim()));
+  const folders = [...new Set([destFolderId, corr ? corr.value : destFolderId])];
+  const lists = await Promise.all(folders.map(async (f) => {
+    const [docs, outlookId] = await Promise.all([listDocs(forJob._id, f), findOutlookFolderId(f)]);
+    return [...docs, ...(outlookId ? await listDocs(forJob._id, outlookId) : [])];
+  }));
+  return lists.flat().filter((d) => (d.name || "").includes(`[${id}]`));
+}
+
+let dupRun = 0;
+function resetDup() { dupRun++; $("dupNote").className = ""; $("dupNote").textContent = ""; }
+async function checkDuplicate() {
+  resetDup();
+  const run = dupRun, forJob = job, item = Office.context.mailbox.item, note = $("dupNote");
+  if (!forJob || !item) return;
+  note.className = "busy"; note.textContent = "Checking whether this email is already saved…";
+  try {
+    const found = await findExisting(forJob, $("folder").value, await emailId(item));
+    if (run !== dupRun || job !== forJob) return; // something changed meanwhile
+    note.className = ""; note.textContent = "";
+    if (found.length) note.textContent = `This email is already saved in this job (${found[0].name}). Only attachments can be saved again.`;
+  } catch (e) { if (run === dupRun) { note.className = ""; note.textContent = `Could not check for an existing copy: ${e.message}`; } }
+}
+
 /* ---------- attachments ---------- */
 let currentAtts = [];
 function renderAttachments() {
@@ -469,10 +529,14 @@ async function uploadFile(name, type, bytes, folderId) {
 }
 
 // Finds (or creates) a sub-folder called "Outlook Files" inside parentId (or the job root when empty).
-async function ensureOutlookFolder(parentId) {
+async function findOutlookFolderId(parentId) {
   const detail = await api(parentId ? `/documents/job/${job._id}/folders/${parentId}` : `/documents/job/${job._id}/folders`);
   const hit = (detail.subFolders || []).find((f) => (f.name || "").trim().toLowerCase() === "outlook files");
-  if (hit) return hit._id;
+  return hit ? hit._id : null;
+}
+async function ensureOutlookFolder(parentId) {
+  const existing = await findOutlookFolderId(parentId);
+  if (existing) return existing;
   const created = await api(`/documents/job/${job._id}/folders`, {
     method: "POST",
     body: JSON.stringify({ name: "Outlook Files", ...(parentId ? { parentId } : {}) }),
@@ -516,6 +580,8 @@ function lockUI(on) {
   for (const el of $("jobs").querySelectorAll("button")) el.disabled = on;
 }
 
+$("folder").addEventListener("change", () => { if (job && !sending) checkDuplicate(); });
+
 $("send").addEventListener("click", async () => {
   if (sending) return;
   sending = true; lockUI(true); $("send").disabled = true;
@@ -530,6 +596,7 @@ $("send").addEventListener("click", async () => {
     setStatus("Reading email…", "busy");
     const item = Office.context.mailbox.item, subject = item.subject, meta = emailMeta();
     const convId = item.conversationId, jobAtSend = job;
+    const idPromise = emailId(item); // identity of the email that is open right now
     const useFmt = $("fmtPdf").checked;
     const reads = atts.map(({ att, typed }) => getAttachment(att).then((f) => ({ att, typed, f }), (e) => ({ att, e })));
     const inlineAtts = (item.attachments || []).filter((a) => a.isInline && (a.contentType || "").startsWith("image/") && (a.size || 0) < 5 * 1024 * 1024);
@@ -538,8 +605,16 @@ $("send").addEventListener("click", async () => {
     const got = rest.slice(0, reads.length), inl = rest.slice(reads.length);
     const eml = b64ToBytes(emlB64);
 
+    // Check, right now, whether this email is already in the job (e.g. a colleague saved it first).
+    const id = await idPromise;
+    let existing = [];
+    try { setStatus("Checking for an existing copy…", "busy"); existing = await findExisting(jobAtSend, folderId, id); }
+    catch (e) { problems.push(`could not check for an existing copy (${e.message})`); }
+    const duplicate = existing.length > 0;
+    const fileBase = `${baseName} [${id}]`;
+
     let pdf = null;
-    if (useFmt) {
+    if (useFmt && !duplicate) {
       try {
         setStatus("Rendering formatted PDF…", "busy");
         const cid = new Map();
@@ -547,16 +622,17 @@ $("send").addEventListener("click", async () => {
         pdf = await renderPdf(buildEmailHtml({ subject, meta, bodyHtml, cid }));
       } catch (e) { problems.push(`formatted PDF unavailable (${e.message}), so a basic text PDF was saved instead`); }
     }
-    if (!pdf) pdf = emailToPdf({ subject, meta, body: bodyText });
+    if (!duplicate) {
+      if (!pdf) pdf = emailToPdf({ subject, meta, body: bodyText });
+      setStatus("Saving PDF…", "busy");
+      await uploadFile(`${fileBase}.pdf`, "application/pdf", pdf, folderId);
 
-    setStatus("Saving PDF…", "busy");
-    await uploadFile(`${baseName}.pdf`, "application/pdf", pdf, folderId);
-
-    try {
-      setStatus("Saving original email to Outlook Files…", "busy");
-      const outlookFolderId = await ensureOutlookFolder(folderId);
-      await uploadFile(`${baseName}.eml`, "message/rfc822", eml, outlookFolderId);
-    } catch (e) { problems.push(`original email not saved (${e.message})`); }
+      try {
+        setStatus("Saving original email to Outlook Files…", "busy");
+        const outlookFolderId = await ensureOutlookFolder(folderId);
+        await uploadFile(`${fileBase}.eml`, "message/rfc822", eml, outlookFolderId);
+      } catch (e) { problems.push(`original email not saved (${e.message})`); }
+    }
 
     let savedAtts = 0, n = 0;
     for (const r of got) {
@@ -573,8 +649,14 @@ $("send").addEventListener("click", async () => {
     try { await addTag(item); } catch (e) { problems.push(`the email could not be tagged (${e.message})`); }
     saveConvRecord(convId, jobAtSend);
 
-    let msg = `Saved. PDF in ${folderLabel}.`;
-    if (!problems.some((p) => p.startsWith("original"))) msg += ` Original email in ${folderLabel} / Outlook Files.`;
+    let msg;
+    if (duplicate) {
+      msg = `This email is already saved in this job (${existing[0].name}), so the PDF and original email were not saved again.`;
+      if (!atts.length) msg += " Nothing new to save.";
+    } else {
+      msg = `Saved. PDF in ${folderLabel}.`;
+      if (!problems.some((p) => p.startsWith("original"))) msg += ` Original email in ${folderLabel} / Outlook Files.`;
+    }
     if (atts.length) msg += ` ${savedAtts} of ${atts.length} attachment${atts.length === 1 ? "" : "s"} in ${attFolderLabel}.`;
     if (problems.length) msg += ` Problems: ${problems.join("; ")}.`;
     setStatus(msg, problems.length ? "err" : "ok");
@@ -582,6 +664,7 @@ $("send").addEventListener("click", async () => {
     setStatus(e.message, "err");
   } finally {
     sending = false; lockUI(false); refreshSend();
+    if (!pendingRefresh && job) checkDuplicate();
     if (pendingRefresh) { pendingRefresh = false; refreshForItem(true); }
   }
 });

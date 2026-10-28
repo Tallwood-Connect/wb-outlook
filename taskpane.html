@@ -38,6 +38,10 @@
   #matchNote+#jobs{margin-top:4px}
   #savedNote{margin:0 0 10px;padding:8px 10px;border-left:3px solid var(--bad);background:var(--soft);border-radius:0 4px 4px 0}
   #savedNote:empty{display:none}
+  #dupNote{margin-top:8px;padding:8px 10px;border-left:3px solid var(--bad);background:var(--soft);border-radius:0 4px 4px 0}
+  #dupNote:empty{display:none}
+  #dupNote.busy{border-left-color:var(--line);color:var(--muted);font-size:12px}
+  #idHint{margin-top:4px;color:var(--muted);font-size:12px}
   #corrNote{margin-top:8px;padding:8px 10px;border-left:3px solid var(--bad);background:var(--soft);border-radius:0 4px 4px 0}
   #corrNote[hidden]{display:none}
   #corrBtn,.sec{display:block;margin-top:6px;padding:5px 10px;border:1px solid var(--accent);border-radius:4px;background:none;color:var(--accent);font:600 13px "Segoe UI",system-ui,sans-serif;cursor:pointer}
@@ -55,7 +59,7 @@
 </style>
 </head>
 <body>
-<h1>Send to Wunderbuild <span id="ver" data-v="1.17">v1.17</span></h1>
+<h1>Send to Wunderbuild <span id="ver" data-v="1.18">v1.18</span></h1>
 
 <details id="settings">
   <summary>API settings</summary>
@@ -86,11 +90,13 @@
   <span>This job has no Correspondence folder.</span>
   <button id="corrBtn" type="button">Create Correspondence folder</button>
 </div>
+<div id="dupNote" role="status"></div>
 
 <div id="note">PDF goes in the folder above. The original email (.eml) goes in an &ldquo;Outlook Files&rdquo; folder inside it, created if missing.</div>
 
 <label for="name">File name (no extension)</label>
 <input id="name" type="text">
+<div id="idHint">A short reference ID is added to the saved file names automatically. It stops the same email being saved twice.</div>
 
 <div id="attSection" hidden>
   <label>Attachments (edit a name to rename it)</label>
@@ -102,7 +108,7 @@
 <button id="send" disabled>Send to Wunderbuild</button>
 <div id="status" role="status" aria-live="polite"></div>
 
-<script src="pdf.js?v=1.17"></script>
-<script src="taskpane.js?v=1.17"></script>
+<script src="pdf.js?v=1.18"></script>
+<script src="taskpane.js?v=1.18"></script>
 </body>
 </html>
