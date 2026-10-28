@@ -45,16 +45,18 @@ function renderJobList(jobs) {
   }
 }
 
+let searchRun = 0;
 async function searchJobs() {
-  const q = $("q").value.trim();
+  const run = ++searchRun, q = $("q").value.trim();
   $("jobs").textContent = "";
-  if (!q) return;
+  if (!q) { setStatus(""); return; }
   try {
-    setStatus("Searching…");
+    setStatus("Searching…", "busy");
     const data = await api(`/jobs?page=1&limit=15&search=${encodeURIComponent(q)}`);
+    if (run !== searchRun) return; // a newer search is running
     setStatus(data.result.length ? "" : "No jobs found.");
     renderJobList(data.result);
-  } catch (e) { setStatus(e.message, "err"); }
+  } catch (e) { if (run === searchRun) setStatus(e.message, "err"); }
 }
 
 /* ---------- match the email subject to a job ---------- */
@@ -135,10 +137,13 @@ async function autoMatch() {
   const run = ++matchRun, note = $("matchNote");
   note.textContent = "";
   const item = Office.context.mailbox.item;
+  note.className = "";
   if (!$("key").value.trim() || !item || !item.subject) return;
   try {
+    note.className = "busy"; note.textContent = "Matching the subject to your jobs…";
     const jobs = await loadAllJobs();
     if (run !== matchRun) return; // a newer email was selected meanwhile
+    note.className = ""; note.textContent = "";
     const m = matchJobs(item.subject, jobs);
     if (!m.length) {
       note.textContent = job ? "No job matched this subject. Check the job above is the right one." : "No job matched this subject. Search for the job above.";
@@ -152,7 +157,7 @@ async function autoMatch() {
       renderJobList(m.slice(0, 3).map((x) => x.j));
       note.textContent = "Possible jobs from the subject. Pick one:";
     }
-  } catch (e) { if (run === matchRun) note.textContent = `Could not match jobs: ${e.message}`; }
+  } catch (e) { if (run === matchRun) { note.className = ""; note.textContent = `Could not match jobs: ${e.message}`; } }
 }
 
 async function chooseJob(j) {
@@ -166,32 +171,33 @@ async function chooseJob(j) {
 }
 
 /* ---------- folders ---------- */
+let folderRun = 0;
 async function loadFolders() {
-  const sel = $("folder");
-  sel.disabled = true;
+  const run = ++folderRun;
+  const sel = $("folder"), af = $("attFolder");
+  sel.disabled = true; af.disabled = true; $("send").disabled = true;
+  sel.innerHTML = ""; af.innerHTML = "";
+  sel.add(new Option("Loading folders…", ""));
+  setStatus("Loading folders…", "busy");
+  let root = null, failed = null;
+  try { root = await api(`/documents/job/${job._id}/folders`); } catch (e) { failed = e; }
+  if (run !== folderRun) return; // another job was picked meanwhile
   sel.innerHTML = "";
   sel.add(new Option("Job documents (top level)", ""));
-  try {
-    const root = await api(`/documents/job/${job._id}/folders`);
-    const walk = (folders, prefix) => {
-      for (const f of folders || []) {
-        sel.add(new Option(prefix + f.name, f._id));
-        walk(f.subFolders, prefix + f.name + " / ");
-      }
-    };
-    walk(root.subFolders, "");
-    // Default to the Correspondence folder (also matches it when nested, e.g. "Admin / Correspondence").
-    const corr = [...sel.options].find((o) => /(^|\/ )correspondence$/i.test(o.text.trim()));
-    if (corr) sel.value = corr.value;
-  } catch (e) { setStatus(e.message, "err"); }
-  sel.disabled = false;
-  const af = $("attFolder");
-  af.innerHTML = "";
+  const walk = (folders, prefix) => {
+    for (const f of folders || []) { sel.add(new Option(prefix + f.name, f._id)); walk(f.subFolders, prefix + f.name + " / "); }
+  };
+  if (root) walk(root.subFolders, "");
+  // Emails default to Correspondence (also matched when nested, e.g. "Admin / Correspondence").
+  const corr = [...sel.options].find((o) => /(^|\/ )correspondence$/i.test(o.text.trim()));
+  if (corr) sel.value = corr.value;
   for (const o of sel.options) af.add(new Option(o.text, o.value));
-  // Attachments default to the "Working Documents" folder (also matched when nested); otherwise the email's folder.
+  // Attachments default to "Working Documents"; otherwise the email's folder.
   const work = [...af.options].find((o) => /(^|\/ )working documents$/i.test(o.text.trim()));
   af.value = work ? work.value : sel.value;
-  af.disabled = false;
+  sel.disabled = false; af.disabled = false;
+  if (failed) setStatus(failed.message, "err"); else setStatus("");
+  refreshSend();
 }
 
 /* ---------- email -> .eml ---------- */
@@ -334,41 +340,49 @@ async function ensureOutlookFolder(parentId) {
   return created._id;
 }
 
+let sending = false, pendingRefresh = false;
+function lockUI(on) {
+  $("q").disabled = on; $("name").disabled = on;
+  $("folder").disabled = on || !job; $("attFolder").disabled = on || !job;
+  for (const el of $("attList").querySelectorAll("input")) el.disabled = on;
+  for (const el of $("jobs").querySelectorAll("button")) el.disabled = on;
+}
+
 $("send").addEventListener("click", async () => {
-  const btn = $("send");
-  btn.disabled = true;
+  if (sending) return;
+  sending = true; lockUI(true); $("send").disabled = true;
   try {
     const baseName = $("name").value.trim().replace(/\.(eml|pdf|msg)$/i, "");
-    const folderId = $("folder").value;
-    const folderLabel = $("folder").selectedOptions[0].text;
-    const attFolderId = $("attFolder").value;
-    const attFolderLabel = $("attFolder").selectedOptions[0].text;
+    const folderId = $("folder").value, folderLabel = $("folder").selectedOptions[0].text;
+    const attFolderId = $("attFolder").value, attFolderLabel = $("attFolder").selectedOptions[0].text;
     const atts = selectedAttachments();
     const problems = [];
 
-    setStatus("Reading email…");
-    const item = Office.context.mailbox.item;
-    const [bodyText, emlB64] = await Promise.all([getBodyText(), getEml()]);
-    const pdf = emailToPdf({ subject: item.subject, meta: emailMeta(), body: bodyText });
+    // Read everything from the open email first, in one go, so clicking another email cannot mix things up.
+    setStatus("Reading email…", "busy");
+    const item = Office.context.mailbox.item, subject = item.subject, meta = emailMeta();
+    const reads = atts.map(({ att, typed }) => getAttachment(att).then((f) => ({ att, typed, f }), (e) => ({ att, e })));
+    const [bodyText, emlB64, ...got] = await Promise.all([getBodyText(), getEml(), ...reads]);
+    const pdf = emailToPdf({ subject, meta, body: bodyText });
     const eml = b64ToBytes(emlB64);
 
-    setStatus("Saving PDF…");
+    setStatus("Saving PDF…", "busy");
     await uploadFile(`${baseName}.pdf`, "application/pdf", pdf, folderId);
 
     try {
-      setStatus("Saving original email to Outlook Files…");
+      setStatus("Saving original email to Outlook Files…", "busy");
       const outlookFolderId = await ensureOutlookFolder(folderId);
       await uploadFile(`${baseName}.eml`, "message/rfc822", eml, outlookFolderId);
     } catch (e) { problems.push(`original email not saved (${e.message})`); }
 
-    let savedAtts = 0;
-    for (const { att, typed } of atts) {
+    let savedAtts = 0, n = 0;
+    for (const r of got) {
+      if (!r.f) { problems.push(`${r.att.name}: ${r.e.message}`); continue; }
       try {
-        setStatus(`Saving attachment ${savedAtts + 1} of ${atts.length}…`);
-        const f = await getAttachment(att);
-        await uploadFile(finalName(typed, f.name), f.type, f.bytes, attFolderId);
+        setStatus(`Saving attachment ${++n} of ${atts.length}…`, "busy");
+        await uploadFile(finalName(r.typed, r.f.name), r.f.type, r.f.bytes, attFolderId);
         savedAtts++;
-      } catch (e) { problems.push(`${att.name}: ${e.message}`); }
+      } catch (e) { problems.push(`${r.att.name}: ${e.message}`); }
     }
 
     let msg = `Saved. PDF in ${folderLabel}.`;
@@ -378,10 +392,20 @@ $("send").addEventListener("click", async () => {
     setStatus(msg, problems.length ? "err" : "ok");
   } catch (e) {
     setStatus(e.message, "err");
+  } finally {
+    sending = false; lockUI(false); refreshSend();
+    if (pendingRefresh) { pendingRefresh = false; refreshForItem(true); }
   }
+});
+
+// Called when a different email is selected in the pinned panel.
+function refreshForItem(keepStatus) {
+  $("name").value = suggestName();
+  renderAttachments();
+  if (!keepStatus) setStatus("");
   refreshSend();
   autoMatch();
-});
+}
 
 /* ---------- init ---------- */
 $("name").addEventListener("input", refreshSend);
@@ -394,7 +418,7 @@ Office.onReady(async () => {
   $("name").value = suggestName();
   renderAttachments();
   // Keep the pane pinned: refresh the file name when another email is selected.
-  Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { $("name").value = suggestName(); renderAttachments(); setStatus(""); refreshSend(); autoMatch(); });
+  Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { if (sending) { pendingRefresh = true; return; } refreshForItem(false); });
   try {
     const saved = JSON.parse(store.get("wb_job") || "null");
     if (saved && saved._id) await chooseJob(saved);

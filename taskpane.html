@@ -34,6 +34,10 @@
   #matchNote:empty{display:none}
   #note{margin-top:6px;color:var(--muted);font-size:12px}
   #status{margin-top:10px;min-height:1.4em}
+  .busy::before{content:"";display:inline-block;width:12px;height:12px;margin-right:8px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @media (prefers-reduced-motion:reduce){.busy::before{animation-duration:2.4s}}
+  input:disabled,select:disabled{opacity:.6}
   #status.err{color:var(--bad)} #status.ok{color:var(--ok)}
 </style>
 </head>
@@ -72,7 +76,7 @@
 <button id="send" disabled>Send to Wunderbuild</button>
 <div id="status" role="status" aria-live="polite"></div>
 
-<script src="pdf.js?v=10"></script>
-<script src="taskpane.js?v=10"></script>
+<script src="pdf.js?v=11"></script>
+<script src="taskpane.js?v=11"></script>
 </body>
 </html>
