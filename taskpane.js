@@ -131,7 +131,18 @@ $("send").addEventListener("click", async () => {
     if (!doc.uploadUrl) throw new Error("Wunderbuild did not return an upload URL.");
 
     setStatus("Uploading…");
-    const put = await fetch(doc.uploadUrl, { method: "PUT", headers: { "Content-Type": type }, body: new Blob([bytes], { type }) });
+    const blob = new Blob([bytes], { type });
+    let put;
+    try {
+      put = await fetch(doc.uploadUrl, { method: "PUT", headers: { "Content-Type": type }, body: blob });
+    } catch {
+      // Storage blocked the browser (CORS): send the file through the proxy instead.
+      put = await fetch(base().replace(/\/api$/, "") + "/upload", {
+        method: "PUT",
+        headers: { "x-api-key": $("key").value.trim(), "x-upload-url": doc.uploadUrl, "Content-Type": type },
+        body: blob,
+      });
+    }
     if (!put.ok) throw new Error(`Upload failed (${put.status}).`);
     setStatus(`Saved to ${job.name}.`, "ok");
   } catch (e) {
