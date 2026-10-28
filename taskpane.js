@@ -77,12 +77,12 @@ async function loadFolders() {
       }
     };
     walk(root.subFolders, "");
-    const last = store.get("wb_folder_" + job._id);
-    if (last && [...sel.options].some((o) => o.value === last)) sel.value = last;
+    // Default to the Correspondence folder (also matches it when nested, e.g. "Admin / Correspondence").
+    const corr = [...sel.options].find((o) => /(^|\/ )correspondence$/i.test(o.text.trim()));
+    if (corr) sel.value = corr.value;
   } catch (e) { setStatus(e.message, "err"); }
   sel.disabled = false;
 }
-$("folder").addEventListener("change", () => job && store.set("wb_folder_" + job._id, $("folder").value));
 
 /* ---------- email -> .eml ---------- */
 function getEml() {
