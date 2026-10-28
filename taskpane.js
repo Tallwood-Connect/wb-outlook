@@ -144,21 +144,37 @@ function renderAttachments() {
   const box = $("attSection"), list = $("attList");
   list.innerHTML = "";
   box.hidden = currentAtts.length === 0;
-  currentAtts.forEach((a, i) => {
+  currentAtts.forEach((a) => {
     const kb = Math.max(1, Math.round((a.size || 0) / 1024));
-    const row = document.createElement("label");
+    const row = document.createElement("div");
     row.className = "att";
     const cb = document.createElement("input");
-    cb.type = "checkbox"; cb.value = String(i);
+    cb.type = "checkbox";
+    cb.setAttribute("aria-label", `Save ${a.name}`);
     // Tick everything except tiny images (usually signature logos).
     cb.checked = !((a.contentType || "").startsWith("image/") && (a.size || 0) < 20480);
-    row.appendChild(cb);
-    row.appendChild(document.createTextNode(`${a.name} (${kb} KB)`));
+    const nm = document.createElement("input");
+    nm.type = "text"; nm.value = a.name || "attachment"; nm.spellcheck = false;
+    nm.setAttribute("aria-label", `File name for ${a.name}`);
+    const sz = document.createElement("small");
+    sz.textContent = `${kb} KB`;
+    row.appendChild(cb); row.appendChild(nm); row.appendChild(sz);
     list.appendChild(row);
   });
 }
+// Rows are in the same order as currentAtts: [checkbox, name box, size].
 function selectedAttachments() {
-  return [...$("attList").querySelectorAll("input:checked")].map((cb) => currentAtts[Number(cb.value)]);
+  return [...$("attList").children]
+    .map((row, i) => ({ att: currentAtts[i], on: row.children[0].checked, typed: row.children[1].value }))
+    .filter((r) => r.on);
+}
+// Cleans the typed name and keeps the original file type if the new name has no extension.
+function finalName(typed, original) {
+  let n = (typed || "").trim().replace(/[\\/:*?"<>|]+/g, "_");
+  if (!n) n = original;
+  const ext = (original.match(/\.[A-Za-z0-9]{1,10}$/) || [""])[0];
+  if (ext && !/\.[A-Za-z][A-Za-z0-9]{0,9}$/.test(n)) n += ext;
+  return n;
 }
 function getAttachment(a) {
   return new Promise((resolve, reject) => {
@@ -243,13 +259,13 @@ $("send").addEventListener("click", async () => {
     } catch (e) { problems.push(`original email not saved (${e.message})`); }
 
     let savedAtts = 0;
-    for (const a of atts) {
+    for (const { att, typed } of atts) {
       try {
         setStatus(`Saving attachment ${savedAtts + 1} of ${atts.length}…`);
-        const f = await getAttachment(a);
-        await uploadFile(f.name, f.type, f.bytes, attFolderId);
+        const f = await getAttachment(att);
+        await uploadFile(finalName(typed, f.name), f.type, f.bytes, attFolderId);
         savedAtts++;
-      } catch (e) { problems.push(`${a.name}: ${e.message}`); }
+      } catch (e) { problems.push(`${att.name}: ${e.message}`); }
     }
 
     let msg = `Saved. PDF in ${folderLabel}.`;
