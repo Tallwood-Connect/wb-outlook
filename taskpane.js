@@ -1,11 +1,15 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.15"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.16"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
   get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
   set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* storage unavailable */ } },
+  remove: (k) => { try { localStorage.removeItem(k); } catch { /* storage unavailable */ } },
+  keys: () => { try { return Object.keys(localStorage); } catch { return []; } },
 };
+// Removes every saved item whose name matches the test.
+const purge = (test) => store.keys().filter(test).forEach((k) => store.remove(k));
 let job = null; // { _id, name }
 
 function setStatus(msg, kind = "") { const s = $("status"); s.textContent = msg; s.className = kind; }
@@ -86,7 +90,7 @@ async function loadAllJobs() {
   if (!jobsCache) {
     try {
       const c = JSON.parse(store.get(JOBS_KEY) || "null");
-      if (c && Array.isArray(c.jobs) && Date.now() - c.at < 7 * 864e5) { jobsCache = c.jobs; jobsAt = c.at; }
+      if (c && Array.isArray(c.jobs) && Date.now() - c.at < 864e5) { jobsCache = c.jobs; jobsAt = c.at; }
     } catch { /* ignore bad saved copy */ }
   }
   if (!jobsCache || Date.now() - jobsAt >= 10 * 60 * 1000) {
@@ -425,6 +429,19 @@ $("corrBtn").addEventListener("click", async () => {
   btn.disabled = false;
 });
 
+$("clearCache").addEventListener("click", () => {
+  jobsCache = null; jobsAt = 0;
+  purge((k) => k === JOBS_KEY || k === "wb_job" || k.startsWith("wb_folder_"));
+  $("clearNote").textContent = "Saved job list cleared. It will be fetched again when needed.";
+});
+$("signOut").addEventListener("click", () => {
+  jobsCache = null; jobsAt = 0;
+  purge((k) => k.startsWith("wb_"));
+  $("key").value = ""; $("base").value = DEFAULT_BASE; $("fmtPdf").checked = true;
+  clearJob();
+  $("clearNote").textContent = "Your key and all saved data were removed from this computer.";
+});
+
 let sending = false, pendingRefresh = false;
 function lockUI(on) {
   $("q").disabled = on; $("name").disabled = on; $("corrBtn").disabled = on;
@@ -515,6 +532,7 @@ $("fmtPdf").addEventListener("change", () => store.set("wb_fmtpdf", $("fmtPdf").
 Office.onReady(async () => {
   const ver = $("ver");
   ver.textContent = `v${APP_VERSION}` + (ver.dataset.v === APP_VERSION ? "" : ` (taskpane.html is v${ver.dataset.v}, files out of sync)`);
+  purge((k) => k === "wb_job" || k.startsWith("wb_folder_")); // leftovers from older versions
   $("key").value = store.get("wb_key") || "";
   $("base").value = store.get("wb_base") || DEFAULT_BASE;
   $("fmtPdf").checked = store.get("wb_fmtpdf") !== "0";
