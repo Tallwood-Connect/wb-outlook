@@ -31,25 +31,128 @@ async function api(path, opts = {}) {
 let timer;
 $("q").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(searchJobs, 300); });
 
-async function searchJobs() {
-  const q = $("q").value.trim();
+function renderJobList(jobs) {
   const list = $("jobs");
   list.textContent = "";
+  for (const j of jobs) {
+    const li = document.createElement("li");
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = `${j.jobNumber ? "#" + j.jobNumber + " " : ""}${j.name || "Untitled job"}`;
+    if (j.address) { const s = document.createElement("small"); s.textContent = j.address; b.appendChild(s); }
+    b.addEventListener("click", () => chooseJob(j));
+    li.appendChild(b); list.appendChild(li);
+  }
+}
+
+async function searchJobs() {
+  const q = $("q").value.trim();
+  $("jobs").textContent = "";
   if (!q) return;
   try {
     setStatus("Searching…");
     const data = await api(`/jobs?page=1&limit=15&search=${encodeURIComponent(q)}`);
     setStatus(data.result.length ? "" : "No jobs found.");
-    for (const j of data.result) {
-      const li = document.createElement("li");
-      const b = document.createElement("button");
-      b.type = "button";
-      b.textContent = `${j.jobNumber ? "#" + j.jobNumber + " " : ""}${j.name || "Untitled job"}`;
-      if (j.address) { const s = document.createElement("small"); s.textContent = j.address; b.appendChild(s); }
-      b.addEventListener("click", () => chooseJob(j));
-      li.appendChild(b); list.appendChild(li);
-    }
+    renderJobList(data.result);
   } catch (e) { setStatus(e.message, "err"); }
+}
+
+/* ---------- match the email subject to a job ---------- */
+const STOP = new Set(["the","and","for","job","site","residence","house","home","lot","unit","street","st","road","rd","avenue","ave","drive","dr","court","ct","place","pl","lane","ln","way","close","cl","crescent","cres","new","build","project","extension","renovation","stage","re","fw","fwd"]);
+const norm = (s) => (s || "").toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/&/g, " and ").replace(/[^a-z0-9]+/g, " ").trim();
+const wordsOf = (s) => norm(s).split(" ").filter(Boolean);
+let jobsCache = null, jobsAt = 0, refreshing = null;
+const JOBS_KEY = "wb_jobs_v1";
+// Keep only what matching needs (job number, address, client). Folders are never read here.
+const slim = (j) => ({ _id: j._id, jobNumber: j.jobNumber, name: j.name, address: j.address,
+  client: j.client ? { firstName: j.client.firstName, lastName: j.client.lastName, businessName: j.client.businessName } : null });
+
+async function fetchAllJobs() {
+  const first = await api("/jobs?page=1&limit=100");
+  let all = first.result || [];
+  const pages = Math.min((first.pagination && first.pagination.totalPages) || 1, 20);
+  if (pages > 1) {
+    const rest = await Promise.all(Array.from({ length: pages - 1 }, (_, i) => api(`/jobs?page=${i + 2}&limit=100`)));
+    for (const d of rest) all = all.concat(d.result || []);
+  }
+  return all.filter((j) => !j.isDeleted).map(slim);
+}
+
+// Uses the saved copy straight away and refreshes it in the background when older than 10 minutes.
+async function loadAllJobs() {
+  if (!jobsCache) {
+    try {
+      const c = JSON.parse(store.get(JOBS_KEY) || "null");
+      if (c && Array.isArray(c.jobs) && Date.now() - c.at < 7 * 864e5) { jobsCache = c.jobs; jobsAt = c.at; }
+    } catch { /* ignore bad saved copy */ }
+  }
+  if (!jobsCache || Date.now() - jobsAt >= 10 * 60 * 1000) {
+    refreshing = refreshing || fetchAllJobs()
+      .then((jobs) => { jobsCache = jobs; jobsAt = Date.now(); store.set(JOBS_KEY, JSON.stringify({ at: jobsAt, jobs })); return jobs; })
+      .finally(() => { refreshing = null; });
+    if (!jobsCache) return refreshing;
+    refreshing.catch(() => {});
+  }
+  return jobsCache;
+}
+
+function scoreJob(S, j) {
+  let best = 0;
+  const has = (phrase) => phrase.length > 0 && (" " + S.norm + " ").includes(" " + phrase + " ");
+  const up = (n) => { if (n > best) best = n; };
+  // Job number: "Job 1042", "#1042" (strong) or a bare 3+ digit number (medium).
+  const n = String(j.jobNumber == null ? "" : j.jobNumber).replace(/\D/g, "").replace(/^0+(?=\d)/, "");
+  if (n) {
+    if (new RegExp(`(?:job|project|ref|no\\.?|number)\\s*#?\\s*0*${n}(?![0-9])`).test(S.raw)) up(100);
+    else if (n.length >= 3 && new RegExp(`#\\s*0*${n}(?![0-9])`).test(S.raw)) up(95);
+    else if (n.length >= 3 && new RegExp(`(^|[^0-9])0*${n}(?![0-9])`).test(S.raw)) up(78);
+  }
+  // Address: written out in full, or house number + street name ("45 Banksia Rd" matches "45 Banksia Road").
+  const addr = norm(j.address);
+  if (addr.length >= 6 && has(addr)) up(90);
+  const aw = wordsOf(j.address);
+  const house = aw.find((w) => /^\d+[a-z]?$/.test(w));
+  const street = aw.filter((w) => !/^\d/.test(w) && w.length >= 3 && !STOP.has(w));
+  if (house && street.length && S.words.has(house) && street.every((w) => S.words.has(w))) up(80);
+  // Client name or business name.
+  const c = j.client;
+  if (c) {
+    const full = norm(`${c.firstName || ""} ${c.lastName || ""}`), biz = norm(c.businessName), last = norm(c.lastName);
+    if ((full.length >= 5 && has(full)) || (biz.length >= 4 && has(biz))) up(70);
+    else if (last.length >= 4 && S.words.has(last)) up(55);
+  }
+  return best;
+}
+
+function matchJobs(subject, jobs) {
+  const raw = (subject || "").replace(/^\s*((re|fw|fwd)\s*:\s*)+/i, "").toLowerCase();
+  const S = { raw, norm: norm(raw), words: new Set(wordsOf(raw)) };
+  return jobs.map((j) => ({ j, s: scoreJob(S, j) })).filter((x) => x.s >= 50).sort((a, b) => b.s - a.s);
+}
+
+let matchRun = 0;
+async function autoMatch() {
+  const run = ++matchRun, note = $("matchNote");
+  note.textContent = "";
+  const item = Office.context.mailbox.item;
+  if (!$("key").value.trim() || !item || !item.subject) return;
+  try {
+    const jobs = await loadAllJobs();
+    if (run !== matchRun) return; // a newer email was selected meanwhile
+    const m = matchJobs(item.subject, jobs);
+    if (!m.length) {
+      note.textContent = job ? "No job matched this subject. Check the job above is the right one." : "No job matched this subject. Search for the job above.";
+      return;
+    }
+    const [top, second] = m;
+    if (top.s >= 75 && (!second || top.s - second.s >= 15)) {
+      if (!job || job._id !== top.j._id) await chooseJob(top.j);
+      note.textContent = "Job filled in from the email subject. Check it is correct.";
+    } else {
+      renderJobList(m.slice(0, 3).map((x) => x.j));
+      note.textContent = "Possible jobs from the subject. Pick one:";
+    }
+  } catch (e) { if (run === matchRun) note.textContent = `Could not match jobs: ${e.message}`; }
 }
 
 async function chooseJob(j) {
@@ -277,6 +380,7 @@ $("send").addEventListener("click", async () => {
     setStatus(e.message, "err");
   }
   refreshSend();
+  autoMatch();
 });
 
 /* ---------- init ---------- */
@@ -290,10 +394,11 @@ Office.onReady(async () => {
   $("name").value = suggestName();
   renderAttachments();
   // Keep the pane pinned: refresh the file name when another email is selected.
-  Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { $("name").value = suggestName(); renderAttachments(); setStatus(""); refreshSend(); });
+  Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { $("name").value = suggestName(); renderAttachments(); setStatus(""); refreshSend(); autoMatch(); });
   try {
     const saved = JSON.parse(store.get("wb_job") || "null");
     if (saved && saved._id) await chooseJob(saved);
   } catch { /* ignore */ }
   refreshSend();
+  autoMatch();
 });
