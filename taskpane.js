@@ -85,7 +85,9 @@ async function loadFolders() {
   const af = $("attFolder");
   af.innerHTML = "";
   for (const o of sel.options) af.add(new Option(o.text, o.value));
-  af.value = sel.value; // defaults to the same folder as the email; change it if you like
+  // Attachments default to the "Working Documents" folder (also matched when nested); otherwise the email's folder.
+  const work = [...af.options].find((o) => /(^|\/ )working documents$/i.test(o.text.trim()));
+  af.value = work ? work.value : sel.value;
   af.disabled = false;
 }
 
