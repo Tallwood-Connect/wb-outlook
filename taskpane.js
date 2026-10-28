@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.16"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.17"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -30,6 +30,71 @@ async function api(path, opts = {}) {
   }
   if (!res.ok) throw new Error(`Wunderbuild returned ${res.status}: ${(await res.text()).slice(0, 200)}`);
   return res.status === 204 ? null : res.json();
+}
+
+/* ---------- "saved" tag and conversation record ---------- */
+const TAG = "Saved to Wunderbuild";
+const CONV_PREFIX = "wb_conv_", CONV_MAX_AGE = 90 * 864e5, CONV_MAX_COUNT = 500;
+
+function hasTag(item) {
+  return new Promise((resolve) => {
+    try {
+      if (!item || !item.categories || typeof item.categories.getAsync !== "function") return resolve(false);
+      item.categories.getAsync((r) => resolve(r.status === Office.AsyncResultStatus.Succeeded && (r.value || []).some((c) => c.displayName === TAG)));
+    } catch { resolve(false); }
+  });
+}
+// Always called with the email that was open when Send was clicked, never "whatever is open now".
+function addTag(item) {
+  return new Promise((resolve, reject) => {
+    if (!item || !item.categories || typeof item.categories.addAsync !== "function") return reject(new Error("this version of Outlook cannot tag emails"));
+    item.categories.addAsync([TAG], (r) => (r.status === Office.AsyncResultStatus.Succeeded ? resolve() : reject(new Error(r.error.message))));
+  });
+}
+function saveConvRecord(convId, j) {
+  if (!convId || !j) return;
+  store.set(CONV_PREFIX + convId, JSON.stringify({ at: Date.now(), j: { _id: j._id, name: j.name, jobNumber: j.jobNumber } }));
+}
+function getConvRecord(convId) {
+  if (!convId) return null;
+  try {
+    const r = JSON.parse(store.get(CONV_PREFIX + convId) || "null");
+    if (r && r.j && r.j._id && Date.now() - r.at < CONV_MAX_AGE) return r;
+  } catch { /* ignore bad record */ }
+  return null;
+}
+// Drops conversation records older than 90 days, and the oldest ones beyond 500.
+function pruneConv() {
+  const recs = [];
+  for (const k of store.keys().filter((k) => k.startsWith(CONV_PREFIX))) {
+    try {
+      const r = JSON.parse(store.get(k));
+      if (r && r.at && Date.now() - r.at < CONV_MAX_AGE) recs.push({ k, at: r.at }); else store.remove(k);
+    } catch { store.remove(k); }
+  }
+  recs.sort((a, b) => b.at - a.at).slice(CONV_MAX_COUNT).forEach((r) => store.remove(r.k));
+}
+const fmtDate = (t) => new Date(t).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" });
+
+// Runs whenever an email is opened: warns if it is already saved, then fills in the job
+// from an earlier email in the same conversation, or else from the subject.
+let fillRun = 0;
+async function smartFill() {
+  const run = ++fillRun, note = $("savedNote");
+  note.textContent = "";
+  const item = Office.context.mailbox.item;
+  if (!item) return;
+  const tagged = await hasTag(item);
+  if (run !== fillRun) return; // another email was selected meanwhile
+  if (tagged) note.textContent = `This email is already tagged "${TAG}". Saving it again will create duplicates in Wunderbuild.`;
+  const rec = job ? null : getConvRecord(item.conversationId);
+  if (rec) {
+    await chooseJob(rec.j);
+    if (run !== fillRun) return;
+    $("autoNote").textContent = `Job filled in from an earlier email in this conversation, saved ${fmtDate(rec.at)}. Check it is correct.`;
+  } else {
+    await autoMatch();
+  }
 }
 
 /* ---------- job search ---------- */
@@ -173,6 +238,7 @@ function clearJob() {
   $("matchNote").className = ""; $("matchNote").textContent = "";
   $("autoNote").textContent = "";
   $("corrNote").hidden = true;
+  $("savedNote").textContent = "";
   $("jobs").textContent = "";
   $("q").value = "";
   for (const id of ["folder", "attFolder"]) {
@@ -431,8 +497,8 @@ $("corrBtn").addEventListener("click", async () => {
 
 $("clearCache").addEventListener("click", () => {
   jobsCache = null; jobsAt = 0;
-  purge((k) => k === JOBS_KEY || k === "wb_job" || k.startsWith("wb_folder_"));
-  $("clearNote").textContent = "Saved job list cleared. It will be fetched again when needed.";
+  purge((k) => k === JOBS_KEY || k === "wb_job" || k.startsWith("wb_folder_") || k.startsWith(CONV_PREFIX));
+  $("clearNote").textContent = "Saved job list and conversation history cleared.";
 });
 $("signOut").addEventListener("click", () => {
   jobsCache = null; jobsAt = 0;
@@ -463,6 +529,7 @@ $("send").addEventListener("click", async () => {
     // Read everything from the open email first, in one go, so clicking another email cannot mix things up.
     setStatus("Reading email…", "busy");
     const item = Office.context.mailbox.item, subject = item.subject, meta = emailMeta();
+    const convId = item.conversationId, jobAtSend = job;
     const useFmt = $("fmtPdf").checked;
     const reads = atts.map(({ att, typed }) => getAttachment(att).then((f) => ({ att, typed, f }), (e) => ({ att, e })));
     const inlineAtts = (item.attachments || []).filter((a) => a.isInline && (a.contentType || "").startsWith("image/") && (a.size || 0) < 5 * 1024 * 1024);
@@ -501,6 +568,11 @@ $("send").addEventListener("click", async () => {
       } catch (e) { problems.push(`${r.att.name}: ${e.message}`); }
     }
 
+    // Mark the email (the one that was open at click time) and remember its conversation.
+    setStatus("Marking the email as saved…", "busy");
+    try { await addTag(item); } catch (e) { problems.push(`the email could not be tagged (${e.message})`); }
+    saveConvRecord(convId, jobAtSend);
+
     let msg = `Saved. PDF in ${folderLabel}.`;
     if (!problems.some((p) => p.startsWith("original"))) msg += ` Original email in ${folderLabel} / Outlook Files.`;
     if (atts.length) msg += ` ${savedAtts} of ${atts.length} attachment${atts.length === 1 ? "" : "s"} in ${attFolderLabel}.`;
@@ -521,7 +593,7 @@ function refreshForItem(keepStatus) {
   renderAttachments();
   if (!keepStatus) setStatus("");
   refreshSend();
-  autoMatch();
+  smartFill();
 }
 
 /* ---------- init ---------- */
@@ -533,6 +605,7 @@ Office.onReady(async () => {
   const ver = $("ver");
   ver.textContent = `v${APP_VERSION}` + (ver.dataset.v === APP_VERSION ? "" : ` (taskpane.html is v${ver.dataset.v}, files out of sync)`);
   purge((k) => k === "wb_job" || k.startsWith("wb_folder_")); // leftovers from older versions
+  pruneConv();
   $("key").value = store.get("wb_key") || "";
   $("base").value = store.get("wb_base") || DEFAULT_BASE;
   $("fmtPdf").checked = store.get("wb_fmtpdf") !== "0";
@@ -542,5 +615,5 @@ Office.onReady(async () => {
   // Keep the pane pinned: refresh the file name when another email is selected.
   Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { if (sending) { pendingRefresh = true; return; } refreshForItem(false); });
   refreshSend();
-  autoMatch();
+  smartFill();
 });
