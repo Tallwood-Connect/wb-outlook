@@ -146,7 +146,7 @@ async function autoMatch() {
     note.className = ""; note.textContent = "";
     const m = matchJobs(item.subject, jobs);
     if (!m.length) {
-      note.textContent = job ? "No job matched this subject. Check the job above is the right one." : "No job matched this subject. Search for the job above.";
+      note.textContent = "No job matched this subject. Search for the job above.";
       return;
     }
     const [top, second] = m;
@@ -160,9 +160,24 @@ async function autoMatch() {
   } catch (e) { if (run === matchRun) { note.className = ""; note.textContent = `Could not match jobs: ${e.message}`; } }
 }
 
+// Forgets the selected job (and its folders) so one email's job never carries over to the next.
+function clearJob() {
+  job = null;
+  folderRun++; searchRun++;
+  $("chosen").textContent = "";
+  $("jobs").textContent = "";
+  $("q").value = "";
+  for (const id of ["folder", "attFolder"]) {
+    const sel = $(id);
+    sel.innerHTML = "";
+    sel.add(new Option("Choose a job first", ""));
+    sel.disabled = true;
+  }
+  refreshSend();
+}
+
 async function chooseJob(j) {
   job = j;
-  store.set("wb_job", JSON.stringify({ _id: j._id, name: j.name, jobNumber: j.jobNumber }));
   $("jobs").textContent = "";
   $("q").value = "";
   $("chosen").textContent = `Job: ${j.jobNumber ? "#" + j.jobNumber + " " : ""}${j.name}`;
@@ -400,6 +415,7 @@ $("send").addEventListener("click", async () => {
 
 // Called when a different email is selected in the pinned panel.
 function refreshForItem(keepStatus) {
+  clearJob();
   $("name").value = suggestName();
   renderAttachments();
   if (!keepStatus) setStatus("");
@@ -419,10 +435,6 @@ Office.onReady(async () => {
   renderAttachments();
   // Keep the pane pinned: refresh the file name when another email is selected.
   Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { if (sending) { pendingRefresh = true; return; } refreshForItem(false); });
-  try {
-    const saved = JSON.parse(store.get("wb_job") || "null");
-    if (saved && saved._id) await chooseJob(saved);
-  } catch { /* ignore */ }
   refreshSend();
   autoMatch();
 });
