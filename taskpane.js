@@ -82,6 +82,11 @@ async function loadFolders() {
     if (corr) sel.value = corr.value;
   } catch (e) { setStatus(e.message, "err"); }
   sel.disabled = false;
+  const af = $("attFolder");
+  af.innerHTML = "";
+  for (const o of sel.options) af.add(new Option(o.text, o.value));
+  af.value = sel.value; // defaults to the same folder as the email; change it if you like
+  af.disabled = false;
 }
 
 /* ---------- email -> .eml ---------- */
@@ -127,6 +132,43 @@ function emailMeta() {
     ["Date:", item.dateTimeCreated ? new Date(item.dateTimeCreated).toLocaleString("en-AU") : ""],
     ["Attach:", atts.join("; ")],
   ];
+}
+
+/* ---------- attachments ---------- */
+let currentAtts = [];
+function renderAttachments() {
+  const item = Office.context.mailbox.item;
+  currentAtts = ((item && item.attachments) || []).filter((a) => !a.isInline);
+  const box = $("attSection"), list = $("attList");
+  list.innerHTML = "";
+  box.hidden = currentAtts.length === 0;
+  currentAtts.forEach((a, i) => {
+    const kb = Math.max(1, Math.round((a.size || 0) / 1024));
+    const row = document.createElement("label");
+    row.className = "att";
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.value = String(i);
+    // Tick everything except tiny images (usually signature logos).
+    cb.checked = !((a.contentType || "").startsWith("image/") && (a.size || 0) < 20480);
+    row.appendChild(cb);
+    row.appendChild(document.createTextNode(`${a.name} (${kb} KB)`));
+    list.appendChild(row);
+  });
+}
+function selectedAttachments() {
+  return [...$("attList").querySelectorAll("input:checked")].map((cb) => currentAtts[Number(cb.value)]);
+}
+function getAttachment(a) {
+  return new Promise((resolve, reject) => {
+    Office.context.mailbox.item.getAttachmentContentAsync(a.id, (r) => {
+      if (r.status !== Office.AsyncResultStatus.Succeeded) return reject(new Error(r.error.message));
+      const v = r.value, name = (a.name || "attachment").replace(/[\\/:*?"<>|]+/g, "_");
+      if (v.format === "base64") return resolve({ name, type: a.contentType || "application/octet-stream", bytes: b64ToBytes(v.content) });
+      if (v.format === "eml") return resolve({ name: /\.eml$/i.test(name) ? name : name + ".eml", type: "message/rfc822", bytes: new TextEncoder().encode(v.content) });
+      if (v.format === "iCalendar") return resolve({ name: /\.ics$/i.test(name) ? name : name + ".ics", type: "text/calendar", bytes: new TextEncoder().encode(v.content) });
+      reject(new Error("it is a cloud link rather than a file"));
+    });
+  });
 }
 
 /* ---------- upload ---------- */
@@ -178,6 +220,10 @@ $("send").addEventListener("click", async () => {
     const baseName = $("name").value.trim().replace(/\.(eml|pdf|msg)$/i, "");
     const folderId = $("folder").value;
     const folderLabel = $("folder").selectedOptions[0].text;
+    const attFolderId = $("attFolder").value;
+    const attFolderLabel = $("attFolder").selectedOptions[0].text;
+    const atts = selectedAttachments();
+    const problems = [];
 
     setStatus("Reading email…");
     const item = Office.context.mailbox.item;
@@ -192,12 +238,23 @@ $("send").addEventListener("click", async () => {
       setStatus("Saving original email to Outlook Files…");
       const outlookFolderId = await ensureOutlookFolder(folderId);
       await uploadFile(`${baseName}.eml`, "message/rfc822", eml, outlookFolderId);
-    } catch (e) {
-      setStatus(`PDF saved to ${folderLabel}, but the original email was not saved: ${e.message}`, "err");
-      refreshSend();
-      return;
+    } catch (e) { problems.push(`original email not saved (${e.message})`); }
+
+    let savedAtts = 0;
+    for (const a of atts) {
+      try {
+        setStatus(`Saving attachment ${savedAtts + 1} of ${atts.length}…`);
+        const f = await getAttachment(a);
+        await uploadFile(f.name, f.type, f.bytes, attFolderId);
+        savedAtts++;
+      } catch (e) { problems.push(`${a.name}: ${e.message}`); }
     }
-    setStatus(`Saved. PDF in ${folderLabel}; original email in ${folderLabel} / Outlook Files.`, "ok");
+
+    let msg = `Saved. PDF in ${folderLabel}.`;
+    if (!problems.some((p) => p.startsWith("original"))) msg += ` Original email in ${folderLabel} / Outlook Files.`;
+    if (atts.length) msg += ` ${savedAtts} of ${atts.length} attachment${atts.length === 1 ? "" : "s"} in ${attFolderLabel}.`;
+    if (problems.length) msg += ` Problems: ${problems.join("; ")}.`;
+    setStatus(msg, problems.length ? "err" : "ok");
   } catch (e) {
     setStatus(e.message, "err");
   }
@@ -213,8 +270,9 @@ Office.onReady(async () => {
   $("base").value = store.get("wb_base") || DEFAULT_BASE;
   if (!$("key").value) $("settings").open = true;
   $("name").value = suggestName();
+  renderAttachments();
   // Keep the pane pinned: refresh the file name when another email is selected.
-  Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { $("name").value = suggestName(); setStatus(""); refreshSend(); });
+  Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { $("name").value = suggestName(); renderAttachments(); setStatus(""); refreshSend(); });
   try {
     const saved = JSON.parse(store.get("wb_job") || "null");
     if (saved && saved._id) await chooseJob(saved);

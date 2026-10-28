@@ -26,6 +26,9 @@
   #send{width:100%;margin-top:16px;padding:9px;border:0;border-radius:4px;background:var(--accent);color:#fff;font:600 14px "Segoe UI",system-ui,sans-serif;cursor:pointer}
   @media (prefers-color-scheme:dark){#send{color:#0b1412}}
   #send:disabled{opacity:.5;cursor:default}
+  .att{display:flex;gap:6px;align-items:baseline;font-weight:400;margin:3px 0}
+  .att input{width:auto}
+  #attList{max-height:120px;overflow:auto}
   #note{margin-top:6px;color:var(--muted);font-size:12px}
   #status{margin-top:10px;min-height:1.4em}
   #status.err{color:var(--bad)} #status.ok{color:var(--ok)}
@@ -55,10 +58,17 @@
 <label for="name">File name (no extension)</label>
 <input id="name" type="text">
 
+<div id="attSection" hidden>
+  <label>Attachments</label>
+  <div id="attList"></div>
+  <label for="attFolder">Save attachments to</label>
+  <select id="attFolder" disabled><option value="">Choose a job first</option></select>
+</div>
+
 <button id="send" disabled>Send to Wunderbuild</button>
 <div id="status" role="status" aria-live="polite"></div>
 
-<script src="pdf.js?v=5"></script>
-<script src="taskpane.js?v=5"></script>
+<script src="pdf.js?v=6"></script>
+<script src="taskpane.js?v=6"></script>
 </body>
 </html>
