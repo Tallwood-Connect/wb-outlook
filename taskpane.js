@@ -106,31 +106,39 @@ function suggestName() {
   const d = item.dateTimeCreated ? new Date(item.dateTimeCreated) : new Date();
   const day = d.toISOString().slice(0, 10);
   const subject = (item.subject || "No subject").replace(/[\\/:*?"<>|\r\n]+/g, " ").trim().slice(0, 100);
-  return `${day} - ${subject}.eml`;
+  return `${day} - ${subject}`;
+}
+
+/* ---------- email details for the PDF ---------- */
+function getBodyText() {
+  return new Promise((resolve, reject) =>
+    Office.context.mailbox.item.body.getAsync(Office.CoercionType.Text, (r) =>
+      r.status === Office.AsyncResultStatus.Succeeded ? resolve(r.value) : reject(new Error(r.error.message))));
+}
+const fmtAddr = (a) => (a ? (a.displayName && a.displayName !== a.emailAddress ? `${a.displayName} <${a.emailAddress}>` : a.emailAddress) : "");
+const fmtList = (l) => (Array.isArray(l) ? l.map(fmtAddr).filter(Boolean).join("; ") : "");
+function emailMeta() {
+  const item = Office.context.mailbox.item;
+  const atts = (item.attachments || []).filter((a) => !a.isInline).map((a) => `${a.name} (${Math.max(1, Math.round(a.size / 1024))} KB)`);
+  return [
+    ["From:", fmtAddr(item.from)],
+    ["To:", fmtList(item.to)],
+    ["Cc:", fmtList(item.cc)],
+    ["Date:", item.dateTimeCreated ? new Date(item.dateTimeCreated).toLocaleString("en-AU") : ""],
+    ["Attach:", atts.join("; ")],
+  ];
 }
 
 /* ---------- upload ---------- */
-$("send").addEventListener("click", async () => {
-  const btn = $("send");
-  btn.disabled = true;
+async function uploadFile(name, type, bytes, folderId) {
   let docId = null;
   try {
-    let name = $("name").value.trim();
-    if (!/\.eml$/i.test(name)) name += ".eml";
-    setStatus("Reading email…");
-    const bytes = b64ToBytes(await getEml());
-    const type = "message/rfc822";
-    const folderId = $("folder").value;
-
-    setStatus("Creating document in Wunderbuild…");
     const doc = await api(`/documents/job/${job._id}`, {
       method: "POST",
       body: JSON.stringify({ name, type, size: bytes.length, ...(folderId ? { folderId } : {}) }),
     });
     docId = doc._id;
     if (!doc.uploadUrl) throw new Error("Wunderbuild did not return an upload URL.");
-
-    setStatus("Uploading…");
     const blob = new Blob([bytes], { type });
     let put;
     try {
@@ -143,10 +151,54 @@ $("send").addEventListener("click", async () => {
         body: blob,
       });
     }
-    if (!put.ok) throw new Error(`Upload failed (${put.status}).`);
-    setStatus(`Saved to ${job.name}.`, "ok");
+    if (!put.ok) throw new Error(`Upload of ${name} failed (${put.status}).`);
+    return doc;
   } catch (e) {
     if (docId) { try { await api(`/documents/job/${job._id}/${docId}`, { method: "DELETE" }); } catch { /* best effort */ } }
+    throw e;
+  }
+}
+
+// Finds (or creates) a sub-folder called "Outlook Files" inside parentId (or the job root when empty).
+async function ensureOutlookFolder(parentId) {
+  const detail = await api(parentId ? `/documents/job/${job._id}/folders/${parentId}` : `/documents/job/${job._id}/folders`);
+  const hit = (detail.subFolders || []).find((f) => (f.name || "").trim().toLowerCase() === "outlook files");
+  if (hit) return hit._id;
+  const created = await api(`/documents/job/${job._id}/folders`, {
+    method: "POST",
+    body: JSON.stringify({ name: "Outlook Files", ...(parentId ? { parentId } : {}) }),
+  });
+  return created._id;
+}
+
+$("send").addEventListener("click", async () => {
+  const btn = $("send");
+  btn.disabled = true;
+  try {
+    const baseName = $("name").value.trim().replace(/\.(eml|pdf|msg)$/i, "");
+    const folderId = $("folder").value;
+    const folderLabel = $("folder").selectedOptions[0].text;
+
+    setStatus("Reading email…");
+    const item = Office.context.mailbox.item;
+    const [bodyText, emlB64] = await Promise.all([getBodyText(), getEml()]);
+    const pdf = emailToPdf({ subject: item.subject, meta: emailMeta(), body: bodyText });
+    const eml = b64ToBytes(emlB64);
+
+    setStatus("Saving PDF…");
+    await uploadFile(`${baseName}.pdf`, "application/pdf", pdf, folderId);
+
+    try {
+      setStatus("Saving original email to Outlook Files…");
+      const outlookFolderId = await ensureOutlookFolder(folderId);
+      await uploadFile(`${baseName}.eml`, "message/rfc822", eml, outlookFolderId);
+    } catch (e) {
+      setStatus(`PDF saved to ${folderLabel}, but the original email was not saved: ${e.message}`, "err");
+      refreshSend();
+      return;
+    }
+    setStatus(`Saved. PDF in ${folderLabel}; original email in ${folderLabel} / Outlook Files.`, "ok");
+  } catch (e) {
     setStatus(e.message, "err");
   }
   refreshSend();

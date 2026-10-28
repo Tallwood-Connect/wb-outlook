@@ -26,6 +26,7 @@
   #send{width:100%;margin-top:16px;padding:9px;border:0;border-radius:4px;background:var(--accent);color:#fff;font:600 14px "Segoe UI",system-ui,sans-serif;cursor:pointer}
   @media (prefers-color-scheme:dark){#send{color:#0b1412}}
   #send:disabled{opacity:.5;cursor:default}
+  #note{margin-top:6px;color:var(--muted);font-size:12px}
   #status{margin-top:10px;min-height:1.4em}
   #status.err{color:var(--bad)} #status.ok{color:var(--ok)}
 </style>
@@ -49,12 +50,15 @@
 <label for="folder">Folder</label>
 <select id="folder" disabled><option value="">Choose a job first</option></select>
 
-<label for="name">File name</label>
+<div id="note">PDF goes in the folder above. The original email (.eml) goes in an &ldquo;Outlook Files&rdquo; folder inside it, created if missing.</div>
+
+<label for="name">File name (no extension)</label>
 <input id="name" type="text">
 
 <button id="send" disabled>Send to Wunderbuild</button>
 <div id="status" role="status" aria-live="polite"></div>
 
-<script src="taskpane.js?v=4"></script>
+<script src="pdf.js?v=5"></script>
+<script src="taskpane.js?v=5"></script>
 </body>
 </html>
