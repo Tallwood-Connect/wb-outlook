@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.27"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.28"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -145,6 +145,7 @@ let subjRun = 0, subjBusy = false;
 async function applySubjectPrefix(remove) {
   if (!isCompose() || !cur) return;
   const run = ++subjRun;
+  $("subjNote").textContent = "";
   try {
     const it = Office.context.mailbox.item;
     const now = await asyncVal((cb) => it.subject.getAsync(cb));
@@ -157,7 +158,7 @@ async function applySubjectPrefix(remove) {
     cur.subject = next; subjBusy = true; // so the live watcher does not treat this as the person typing
     await new Promise((resolve, reject) => it.subject.setAsync(next, (r) => (r.status === Office.AsyncResultStatus.Succeeded ? resolve() : reject(new Error((r.error && r.error.message) || "Outlook refused")))));
     if (!nameEdited) { $("name").value = suggestName(); refreshSend(); }
-  } catch (e) { setStatus(`Could not change the subject: ${e.message}`, "err"); }
+  } catch (e) { $("subjNote").textContent = `Could not change the subject: ${e && e.message ? e.message : e}`; }
   finally { if (run === subjRun) subjBusy = false; }
 }
 
@@ -280,7 +281,7 @@ async function autoMatch() {
 
 // Forgets the selected job (and its folders) so one email's job never carries over to the next.
 function clearJob() {
-  job = null; jobAuto = false;
+  job = null; jobAuto = false; $("subjNote").textContent = "";
   folderRun++; searchRun++;
   $("chosen").textContent = "";
   $("matchNote").className = ""; $("matchNote").textContent = "";

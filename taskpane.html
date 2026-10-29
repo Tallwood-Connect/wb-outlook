@@ -34,6 +34,8 @@
   .chk input{width:auto}
   #matchNote,#autoNote{margin-top:6px;color:var(--muted);font-size:12px}
   #matchNote:empty,#autoNote:empty{display:none}
+  #subjNote{margin-top:6px;color:var(--bad);font-size:12px}
+  #subjNote:empty{display:none}
   #matchNote+#jobs{margin-top:4px}
   #dupNote{margin-top:8px;padding:8px 10px;border-left:3px solid var(--bad);background:var(--soft);border-radius:0 4px 4px 0}
   #dupNote:empty{display:none}
@@ -59,7 +61,7 @@
 </style>
 </head>
 <body>
-<h1>Send to Wunderbuild <span id="ver" data-v="1.27">v1.27</span></h1>
+<h1>Send to Wunderbuild <span id="ver" data-v="1.28">v1.28</span></h1>
 
 <details id="settings">
   <summary>API settings</summary>
@@ -83,6 +85,7 @@
 <ul id="jobs"></ul>
 <div id="chosen"></div>
 <div id="autoNote"></div>
+<div id="subjNote" role="alert"></div>
 
 <label for="folder">Folder</label>
 <select id="folder" disabled><option value="">Choose a job first</option></select>
@@ -109,8 +112,8 @@
 <button type="button" class="sec" id="refreshDraft" hidden>Reset</button>
 <div id="status" role="status" aria-live="polite"></div>
 
-<script src="pdf.js?v=1.27"></script>
-<script src="eml.js?v=1.27"></script>
-<script src="taskpane.js?v=1.27"></script>
+<script src="pdf.js?v=1.28"></script>
+<script src="eml.js?v=1.28"></script>
+<script src="taskpane.js?v=1.28"></script>
 </body>
 </html>
