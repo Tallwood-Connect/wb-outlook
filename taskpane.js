@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.29"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.35"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -141,7 +141,9 @@ function buildPrefix(j) { // e.g. "J-01067 - Smith (#12 Oak Street, PERTH)"
 function stripPrefix(subject) { // the subject without the job details this add-in added
   const t = subject || "";
   if (appliedPrefix && t.startsWith(appliedPrefix)) return t.slice(appliedPrefix.length).replace(/^[\s:\-–]+/, "");
-  return t;
+  // also recognise details added earlier (e.g. before the panel was reopened): "J-01067 - Name (#12 Street, SUBURB) - "
+  const m = /^J-\d{5,}(?: - [^()]*?)?(?: \([^()]*\))?(?:\s*-\s*|\s*$)/.exec(t);
+  return m ? t.slice(m[0].length) : t;
 }
 let subjRun = 0, subjBusy = false;
 async function applySubjectPrefix(remove) {
@@ -316,6 +318,17 @@ async function chooseJob(j) {
 
 /* ---------- folders ---------- */
 let folderRun = 0;
+let corrMissing = false;
+// Creates the job's Correspondence folder (used when saving) and selects it.
+async function createCorrespondence(forJob) {
+  await api(`/documents/job/${forJob._id}/folders`, { method: "POST", body: JSON.stringify({ name: "Correspondence" }) });
+  const root = await api(`/documents/job/${forJob._id}/folders`);
+  const f = (root.subFolders || []).find((x) => /^correspondence$/i.test((x.name || "").trim()));
+  if (!f) throw new Error("The Correspondence folder could not be created.");
+  const sel = $("folder"), o = new Option(f.name, f._id);
+  sel.add(o); sel.value = f._id;
+  corrMissing = false; $("corrNote").hidden = true;
+}
 async function loadFolders() {
   const run = ++folderRun;
   const sel = $("folder"), af = $("attFolder");
@@ -336,7 +349,8 @@ async function loadFolders() {
   // Emails default to Correspondence (also matched when nested, e.g. "Admin / Correspondence").
   const corr = [...sel.options].find((o) => /(^|\/ )correspondence$/i.test(o.text.trim()));
   if (corr) sel.value = corr.value;
-  $("corrNote").hidden = !!corr || !!failed; // only claim it is missing when the folder list loaded fine
+  corrMissing = !corr && !failed; // only claim it is missing when the folder list loaded fine
+  $("corrNote").hidden = !corrMissing;
   for (const o of sel.options) af.add(new Option(o.text, o.value));
   // Attachments default to "Working Documents"; otherwise the email's folder.
   const work = [...af.options].find((o) => /(^|\/ )working documents$/i.test(o.text.trim()));
@@ -594,21 +608,6 @@ async function ensureOutlookFolder(parentId) {
   return created._id;
 }
 
-$("corrBtn").addEventListener("click", async () => {
-  const forJob = job;
-  if (!forJob || sending) return;
-  const btn = $("corrBtn");
-  btn.disabled = true;
-  try {
-    setStatus("Creating Correspondence folder…", "busy");
-    await api(`/documents/job/${forJob._id}/folders`, { method: "POST", body: JSON.stringify({ name: "Correspondence" }) });
-    if (job !== forJob) return; // a different job was picked meanwhile
-    await loadFolders();
-    setStatus("Correspondence folder created.", "ok");
-  } catch (e) { setStatus(e.message, "err"); }
-  btn.disabled = false;
-});
-
 $("clearCache").addEventListener("click", () => {
   jobsCache = null; jobsAt = 0;
   purge((k) => k === JOBS_KEY || k === "wb_job" || k.startsWith("wb_folder_") || k.startsWith(CONV_PREFIX));
@@ -617,7 +616,7 @@ $("clearCache").addEventListener("click", () => {
 $("signOut").addEventListener("click", () => {
   jobsCache = null; jobsAt = 0;
   purge((k) => k.startsWith("wb_"));
-  $("key").value = ""; $("base").value = DEFAULT_BASE; $("fmtPdf").checked = true; $("askSend").checked = false; $("subjPrefix").checked = false;
+  $("key").value = ""; $("base").value = DEFAULT_BASE; $("fmtPdf").checked = true; $("askSend").checked = false; $("subjPrefix").checked = false; syncSwitch();
   try { const rs = Office.context.roamingSettings; rs.set("wb_ask", false); rs.saveAsync(() => {}); } catch { /* ignore */ }
   clearJob();
   $("clearNote").textContent = "Your key and all saved data were removed from this computer.";
@@ -625,7 +624,7 @@ $("signOut").addEventListener("click", () => {
 
 let sending = false, pendingRefresh = false;
 function lockUI(on) {
-  $("q").disabled = on; $("name").disabled = on; $("corrBtn").disabled = on;
+  $("q").disabled = on; $("name").disabled = on;
   $("folder").disabled = on || !job; $("attFolder").disabled = on || !job;
   for (const el of $("attList").querySelectorAll("input")) el.disabled = on;
   for (const el of $("jobs").querySelectorAll("button")) el.disabled = on;
@@ -665,6 +664,7 @@ $("send").addEventListener("click", async () => {
   sending = true; lockUI(true); $("send").disabled = true;
   try {
     const baseName = $("name").value.trim().replace(/\.(eml|pdf|msg)$/i, "");
+    if (corrMissing && job) { setStatus("Creating Correspondence folder…", "busy"); await createCorrespondence(job); }
     const folderId = $("folder").value, folderLabel = $("folder").selectedOptions[0].text;
     const attFolderId = $("attFolder").value, attFolderLabel = $("attFolder").selectedOptions[0].text;
     const atts = selectedAttachments();
@@ -810,8 +810,14 @@ $("name").addEventListener("input", () => { nameEdited = true; refreshSend(); })
 $("askSend").addEventListener("change", () => {
   try { const rs = Office.context.roamingSettings; rs.set("wb_ask", $("askSend").checked); rs.saveAsync(() => {}); } catch { /* settings unavailable */ }
 });
-$("refreshDraft").addEventListener("click", () => { if (!sending) refreshForItem(false); });
+$("refreshDraft").addEventListener("click", async () => {
+  if (sending) return;
+  await applySubjectPrefix(true); // take the added job details back out of the subject first
+  refreshForItem(false);
+});
+function syncSwitch() { $("swAuto").classList.toggle("on", $("subjPrefix").checked); $("swManual").classList.toggle("on", !$("subjPrefix").checked); }
 $("subjPrefix").addEventListener("change", () => {
+  syncSwitch();
   store.set("wb_subjprefix", $("subjPrefix").checked ? "1" : "0");
   applySubjectPrefix(!$("subjPrefix").checked); // switching it off takes the added text back out
 });
@@ -826,7 +832,7 @@ Office.onReady(async () => {
   $("base").value = store.get("wb_base") || DEFAULT_BASE;
   $("fmtPdf").checked = store.get("wb_fmtpdf") !== "0";
   $("subjPrefix").checked = store.get("wb_subjprefix") === "1";
-  $("subjRow").hidden = !isCompose();
+  $("subjBar").hidden = !isCompose(); syncSwitch();
   try { $("askSend").checked = Office.context.roamingSettings.get("wb_ask") === true; } catch { /* settings unavailable */ }
   if (!$("key").value) $("settings").open = true;
   if (isCompose()) { // writing an email: save the draft rather than a received email

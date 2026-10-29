@@ -42,9 +42,19 @@
   #dupNote.busy{border-left-color:var(--line);color:var(--muted);font-size:12px}
   #corrNote{margin-top:8px;padding:8px 10px;border-left:3px solid var(--bad);background:var(--soft);border-radius:0 4px 4px 0}
   #corrNote[hidden]{display:none}
-  #corrBtn,.sec{display:block;margin-top:6px;padding:5px 10px;border:1px solid var(--accent);border-radius:4px;background:none;color:var(--accent);font:600 13px "Segoe UI",system-ui,sans-serif;cursor:pointer}
-  #corrBtn:disabled,.sec:disabled{opacity:.5;cursor:default}
-  .sec[hidden],.chk[hidden]{display:none}
+  .sec{display:block;margin-top:6px;padding:5px 10px;border:1px solid var(--accent);border-radius:4px;background:none;color:var(--accent);font:600 13px "Segoe UI",system-ui,sans-serif;cursor:pointer}
+  .sec:disabled{opacity:.5;cursor:default}
+  [hidden]{display:none!important}
+  #subjBar{display:flex;align-items:center;gap:8px;margin:12px 0 2px;font-size:13px}
+  #subjBar .swl{font-weight:600;margin-right:4px}
+  #subjBar .swt{color:var(--muted)} #subjBar .swt.on{color:var(--accent);font-weight:600}
+  .switch{position:relative;display:inline-block;width:40px;height:22px;margin:0}
+  .switch input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer;z-index:1}
+  .switch .track{position:absolute;inset:0;border-radius:11px;background:var(--line);transition:background .15s}
+  .switch .track::after{content:"";position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.35);transition:transform .15s}
+  .switch input:checked+.track{background:var(--brand)}
+  .switch input:checked+.track::after{transform:translateX(18px)}
+  .switch input:focus-visible+.track{outline:2px solid var(--accent);outline-offset:2px}
   .btns{margin-top:8px}
   #clearNote{margin-top:6px;color:var(--muted);font-size:12px}
   #clearNote:empty{display:none}
@@ -61,7 +71,14 @@
 </style>
 </head>
 <body>
-<h1>Send to Wunderbuild <span id="ver" data-v="1.29">v1.29</span></h1>
+<h1>Send to Wunderbuild <span id="ver" data-v="1.35">v1.35</span></h1>
+
+<div id="subjBar" hidden>
+  <span class="swl">Subject</span>
+  <span class="swt" id="swManual">Manual</span>
+  <label class="switch"><input type="checkbox" id="subjPrefix" role="switch" aria-label="Fill in the job details at the start of the subject automatically"><span class="track"></span></label>
+  <span class="swt" id="swAuto">Auto</span>
+</div>
 
 <details id="settings">
   <summary>API settings</summary>
@@ -71,7 +88,6 @@
   <input id="base" type="url" value="https://api.wunderbuild.com/api">
   <label class="chk"><input type="checkbox" id="fmtPdf" checked> Formatted PDF (rendered by the Cloudflare Worker)</label>
   <label class="chk"><input type="checkbox" id="askSend"> Ask me to save sent emails to Wunderbuild when I click Send</label>
-  <label class="chk" id="subjRow" hidden><input type="checkbox" id="subjPrefix"> Add the job number, name and address to the start of the email subject</label>
   <div class="btns">
     <button type="button" class="sec" id="clearCache">Clear saved job list and history</button>
     <button type="button" class="sec" id="signOut">Remove my key and saved data</button>
@@ -87,12 +103,9 @@
 <div id="autoNote"></div>
 <div id="subjNote" role="alert"></div>
 
-<label for="folder">Folder</label>
-<select id="folder" disabled><option value="">Choose a job first</option></select>
-<div id="corrNote" role="alert" hidden>
-  <span>This job has no Correspondence folder.</span>
-  <button id="corrBtn" type="button">Create Correspondence folder</button>
-</div>
+<label for="folder" hidden>Folder</label>
+<select id="folder" hidden disabled><option value="">Choose a job first</option></select>
+<div id="corrNote" role="status" hidden>This job has no Correspondence folder. One will be created when you save.</div>
 <div id="dupNote" role="status"></div>
 
 <details class="more"><summary>More Info</summary><div>PDF will be saved to the selected location above. The original email will be saved under Outlook Files.</div></details>
@@ -112,8 +125,8 @@
 <button type="button" class="sec" id="refreshDraft" hidden>Reset</button>
 <div id="status" role="status" aria-live="polite"></div>
 
-<script src="pdf.js?v=1.29"></script>
-<script src="eml.js?v=1.29"></script>
-<script src="taskpane.js?v=1.29"></script>
+<script src="pdf.js?v=1.35"></script>
+<script src="eml.js?v=1.35"></script>
+<script src="taskpane.js?v=1.35"></script>
 </body>
 </html>
