@@ -61,7 +61,7 @@
 </style>
 </head>
 <body>
-<h1>Send to Wunderbuild <span id="ver" data-v="1.28">v1.28</span></h1>
+<h1>Send to Wunderbuild <span id="ver" data-v="1.29">v1.29</span></h1>
 
 <details id="settings">
   <summary>API settings</summary>
@@ -71,7 +71,7 @@
   <input id="base" type="url" value="https://api.wunderbuild.com/api">
   <label class="chk"><input type="checkbox" id="fmtPdf" checked> Formatted PDF (rendered by the Cloudflare Worker)</label>
   <label class="chk"><input type="checkbox" id="askSend"> Ask me to save sent emails to Wunderbuild when I click Send</label>
-  <label class="chk" id="subjRow" hidden><input type="checkbox" id="subjPrefix"> Add the job number, client and address to the start of the email subject</label>
+  <label class="chk" id="subjRow" hidden><input type="checkbox" id="subjPrefix"> Add the job number, name and address to the start of the email subject</label>
   <div class="btns">
     <button type="button" class="sec" id="clearCache">Clear saved job list and history</button>
     <button type="button" class="sec" id="signOut">Remove my key and saved data</button>
@@ -112,8 +112,8 @@
 <button type="button" class="sec" id="refreshDraft" hidden>Reset</button>
 <div id="status" role="status" aria-live="polite"></div>
 
-<script src="pdf.js?v=1.28"></script>
-<script src="eml.js?v=1.28"></script>
-<script src="taskpane.js?v=1.28"></script>
+<script src="pdf.js?v=1.29"></script>
+<script src="eml.js?v=1.29"></script>
+<script src="taskpane.js?v=1.29"></script>
 </body>
 </html>

@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.28"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.29"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -130,11 +130,13 @@ function renderJobList(jobs) {
 /* ---------- job details in the subject (emails being written only) ---------- */
 let appliedPrefix = ""; // the text this add-in last put at the start of the subject
 function subjectPrefixOn() { return isCompose() && store.get("wb_subjprefix") === "1"; }
-function buildPrefix(j) {
-  const c = j.client || {};
-  const client = `${c.firstName || ""} ${c.lastName || ""}`.trim() || (c.businessName || "").trim();
-  const head = [j.jobNumber ? String(j.jobNumber) : "", client].filter(Boolean).join(" - ");
-  return (head + (j.address ? ` (${j.address})` : "")).trim();
+function buildPrefix(j) { // e.g. "J-01067 - Smith (#12 Oak Street, PERTH)"
+  const num = j.jobNumber ? "J-" + String(j.jobNumber).replace(/\D/g, "").padStart(5, "0") : "";
+  const name = String(j.name || "").replace(/\s*[-–]\s*D\s*$/i, "").trim(); // drops a trailing "- D"
+  let street = String(j.address || "").trim();
+  if (/^\d/.test(street)) street = "#" + street; // street number gets a #; "Lot 5" and "L5" do not
+  const place = [street, String(j.city || "").trim().toUpperCase()].filter(Boolean).join(", ");
+  return [num, name].filter(Boolean).join(" - ") + (place ? ` (${place})` : "");
 }
 function stripPrefix(subject) { // the subject without the job details this add-in added
   const t = subject || "";
@@ -152,9 +154,9 @@ async function applySubjectPrefix(remove) {
     if (run !== subjRun || now == null) return;
     const rest = stripPrefix(now);
     const prefix = remove || !job ? "" : buildPrefix(job);
-    const next = prefix ? (rest ? `${prefix} - ${rest}` : prefix) : rest;
+    const next = prefix ? `${prefix} - ${rest}` : rest; // ends "- " ready for the person to type
     appliedPrefix = prefix;
-    if (next === now) return;
+    if (next.trimEnd() === now.trimEnd()) return; // Outlook may trim the trailing space
     cur.subject = next; subjBusy = true; // so the live watcher does not treat this as the person typing
     await new Promise((resolve, reject) => it.subject.setAsync(next, (r) => (r.status === Office.AsyncResultStatus.Succeeded ? resolve() : reject(new Error((r.error && r.error.message) || "Outlook refused")))));
     if (!nameEdited) { $("name").value = suggestName(); refreshSend(); }
@@ -181,9 +183,9 @@ const STOP = new Set(["the","and","for","job","site","residence","house","home",
 const norm = (s) => (s || "").toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/&/g, " and ").replace(/[^a-z0-9]+/g, " ").trim();
 const wordsOf = (s) => norm(s).split(" ").filter(Boolean);
 let jobsCache = null, jobsAt = 0, refreshing = null;
-const JOBS_KEY = "wb_jobs_v1";
+const JOBS_KEY = "wb_jobs_v2";
 // Keep only what matching needs (job number, address, client). Folders are never read here.
-const slim = (j) => ({ _id: j._id, jobNumber: j.jobNumber, name: j.name, address: j.address,
+const slim = (j) => ({ _id: j._id, jobNumber: j.jobNumber, name: j.name, address: j.address, city: j.city,
   client: j.client ? { firstName: j.client.firstName, lastName: j.client.lastName, businessName: j.client.businessName } : null });
 
 async function fetchAllJobs() {
@@ -778,7 +780,7 @@ function startSubjectWatch() {
     try {
       const it = Office.context.mailbox.item;
       const subject = await asyncVal((cb) => it.subject.getAsync(cb));
-      if (subject == null || sending || subject === cur.subject) return;
+      if (subject == null || sending || subject.trimEnd() === cur.subject.trimEnd()) return;
       cur.subject = subject;
       if (!nameEdited) { $("name").value = suggestName(); refreshSend(); }
       // the subject changed: suggest jobs again, unless a job was picked by hand
@@ -818,7 +820,7 @@ $("fmtPdf").addEventListener("change", () => store.set("wb_fmtpdf", $("fmtPdf").
 Office.onReady(async () => {
   const ver = $("ver");
   ver.textContent = `v${APP_VERSION}` + (ver.dataset.v === APP_VERSION ? "" : ` (taskpane.html is v${ver.dataset.v}, files out of sync)`);
-  purge((k) => k === "wb_job" || k.startsWith("wb_folder_")); // leftovers from older versions
+  purge((k) => k === "wb_job" || k === "wb_jobs_v1" || k.startsWith("wb_folder_")); // leftovers from older versions
   pruneConv();
   $("key").value = store.get("wb_key") || "";
   $("base").value = store.get("wb_base") || DEFAULT_BASE;
