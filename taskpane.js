@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.36"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.37"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -443,7 +443,8 @@ function buildEmailHtml({ subject, meta, bodyHtml, cid }) {
   const rows = meta.filter(([, v]) => v).map(([k, v]) =>
     `<tr><td style="padding:1px 10px 1px 0;font-weight:bold;vertical-align:top;white-space:nowrap">${escHtml(k)}</td><td style="padding:1px 0">${escHtml(v)}</td></tr>`).join("");
   return `<!doctype html><html><head><meta charset="utf-8">` +
-    `<meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none'"></head><body style="margin:0">` +
+    `<meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none'">` +
+    `<style>img{max-width:100%!important;height:auto!important}</style></head><body style="margin:0">` + // keeps pictures in proportion
     `<div style="font:13px Arial,Helvetica,sans-serif;color:#000;border-bottom:1px solid #999;padding-bottom:10px;margin-bottom:14px">` +
     `<div style="font-size:18px;font-weight:bold;margin-bottom:8px">${escHtml(subject || "(No subject)")}</div><table style="border-collapse:collapse">${rows}</table></div>` +
     `<div>${body}</div></body></html>`;
@@ -847,6 +848,15 @@ $("subjPrefix").addEventListener("change", () => {
 });
 $("fmtPdf").addEventListener("change", () => store.set("wb_fmtpdf", $("fmtPdf").checked ? "1" : "0"));
 
+// Shows the controls that belong to the item in front of the person: a received email or one being written.
+function applyMode() {
+  const compose = isCompose();
+  $("subjBar").hidden = !compose; syncSwitch();
+  $("refreshDraft").hidden = !compose;
+  $("send").textContent = compose ? "Save and send" : "Send to Wunderbuild";
+  if (compose) startSubjectWatch();
+}
+
 Office.onReady(async () => {
   const ver = $("ver");
   ver.textContent = `v${APP_VERSION}` + (ver.dataset.v === APP_VERSION ? "" : ` (taskpane.html is v${ver.dataset.v}, files out of sync)`);
@@ -856,16 +866,11 @@ Office.onReady(async () => {
   $("base").value = store.get("wb_base") || DEFAULT_BASE;
   $("fmtPdf").checked = store.get("wb_fmtpdf") !== "0";
   $("subjPrefix").checked = store.get("wb_subjprefix") === "1";
-  $("subjBar").hidden = !isCompose(); syncSwitch();
   try { $("askSend").checked = Office.context.roamingSettings.get("wb_ask") === true; } catch { /* settings unavailable */ }
   if (!$("key").value) $("settings").open = true;
-  if (isCompose()) { // writing an email: save the draft rather than a received email
-    $("refreshDraft").hidden = false;
-    $("send").textContent = "Save and send";
-    startSubjectWatch();
-  } else {
-    // Keep the pane pinned: refresh when another email is selected.
-    Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { if (sending) { pendingRefresh = true; return; } refreshForItem(false); });
-  }
+  applyMode();
+  // The pane stays open while other items are selected, and the same pane can show a received email or an email
+  // being written (e.g. an inline reply), so the mode is re-checked every time the item changes.
+  Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { applyMode(); if (sending) { pendingRefresh = true; return; } refreshForItem(false); });
   await refreshForItem(false);
 });
