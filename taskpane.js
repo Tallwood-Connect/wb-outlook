@@ -786,11 +786,27 @@ Office.onReady(async () => {
     $("send").textContent = "Save and send";
     // The panel stays blank apart from one button; the options appear when it is clicked.
     $("panel").hidden = true; $("gate").hidden = false;
-    $("gateBtn").addEventListener("click", async () => {
+    let opened = false;
+    const openPanel = async () => {
+      if (opened) return;
+      opened = true; clearInterval(gateTimer);
       $("gate").hidden = true; $("panel").hidden = false;
       await refreshForItem(false);
       startSubjectWatch();
-    });
+    };
+    // The send-time prompt leaves a note on the draft ("wbOpen") so the panel opens expanded.
+    const checkOpenNote = async () => {
+      try {
+        const props = await asyncVal((cb) => Office.context.mailbox.item.loadCustomPropertiesAsync(cb));
+        const t = props && props.get("wbOpen");
+        if (!t) return;
+        props.remove("wbOpen"); props.saveAsync(() => {}); // used once
+        if (Date.now() - t < 120000) openPanel();
+      } catch { /* not available: the button still works */ }
+    };
+    $("gateBtn").addEventListener("click", openPanel);
+    const gateTimer = setInterval(checkOpenNote, 1000); // also covers a panel that was already open
+    checkOpenNote();
     return;
   } else {
     // Keep the pane pinned: refresh when another email is selected.

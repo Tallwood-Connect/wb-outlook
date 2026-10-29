@@ -26,12 +26,14 @@ function onMessageSendHandler(event) {
       try {
         if (r.status !== Office.AsyncResultStatus.Succeeded) return done({ allowEvent: true }, "could not read draft properties");
         if (r.value.get("wbSaved") === true) return done({ allowEvent: true }, "already saved");
-        done({
+        const block = () => done({
           allowEvent: false,
           errorMessage: "Would you like to save this email to Wunderbuild?",
           cancelLabel: "Send to Wunderbuild",
           commandId: "wbComposeButton",
         }, "not saved yet");
+        // Leave a note on the draft so the panel opens already expanded when the button is clicked.
+        try { r.value.set("wbOpen", Date.now()); r.value.saveAsync(() => block()); } catch (e) { block(); }
       } catch (e) { done({ allowEvent: true }, `error: ${e && e.message}`); }
     });
   } catch (e) { done({ allowEvent: true }, `error: ${e && e.message}`); }
