@@ -2,7 +2,7 @@
    If the person has switched on "Ask me to save sent emails", it offers to save the email to Wunderbuild first.
    Safety rule: anything unexpected lets the email send. This must never trap an email.
    Messages starting with [WB] go to the browser console, to help find problems. */
-const WB_LE_VERSION = "1.25";
+const WB_LE_VERSION = "1.26";
 const wbLog = (m) => { try { console.log(`[WB ${WB_LE_VERSION}] ${m}`); } catch (e) { /* no console */ } };
 wbLog("send-time script loaded");
 try { window.addEventListener("error", (e) => wbLog(`script error: ${e && e.message}`)); } catch (e) { /* not a browser page */ }

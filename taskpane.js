@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.25"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.26"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -115,7 +115,8 @@ $("q").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout
 function renderJobList(jobs) {
   const list = $("jobs");
   list.textContent = "";
-  for (const j of jobs) {
+  const byName = (a, b) => String(a.name || "").localeCompare(String(b.name || ""), undefined, { numeric: true, sensitivity: "base" });
+  for (const j of [...jobs].sort(byName)) {
     const li = document.createElement("li");
     const b = document.createElement("button");
     b.type = "button";
@@ -124,6 +125,40 @@ function renderJobList(jobs) {
     b.addEventListener("click", () => { jobAuto = false; chooseJob(j); });
     li.appendChild(b); list.appendChild(li);
   }
+}
+
+/* ---------- job details in the subject (emails being written only) ---------- */
+let appliedPrefix = ""; // the text this add-in last put at the start of the subject
+function subjectPrefixOn() { return isCompose() && store.get("wb_subjprefix") === "1"; }
+function buildPrefix(j) {
+  const c = j.client || {};
+  const client = `${c.firstName || ""} ${c.lastName || ""}`.trim() || (c.businessName || "").trim();
+  const head = [j.jobNumber ? String(j.jobNumber) : "", client].filter(Boolean).join(" - ");
+  return (head + (j.address ? ` (${j.address})` : "")).trim();
+}
+function stripPrefix(subject) { // the subject without the job details this add-in added
+  const t = subject || "";
+  if (appliedPrefix && t.startsWith(appliedPrefix)) return t.slice(appliedPrefix.length).replace(/^[\s:\-–]+/, "");
+  return t;
+}
+let subjRun = 0, subjBusy = false;
+async function applySubjectPrefix(remove) {
+  if (!isCompose() || !cur) return;
+  const run = ++subjRun;
+  try {
+    const it = Office.context.mailbox.item;
+    const now = await asyncVal((cb) => it.subject.getAsync(cb));
+    if (run !== subjRun || now == null) return;
+    const rest = stripPrefix(now);
+    const prefix = remove || !job ? "" : buildPrefix(job);
+    const next = prefix ? (rest ? `${prefix} - ${rest}` : prefix) : rest;
+    appliedPrefix = prefix;
+    if (next === now) return;
+    cur.subject = next; subjBusy = true; // so the live watcher does not treat this as the person typing
+    await new Promise((resolve, reject) => it.subject.setAsync(next, (r) => (r.status === Office.AsyncResultStatus.Succeeded ? resolve() : reject(new Error((r.error && r.error.message) || "Outlook refused")))));
+    if (!nameEdited) { $("name").value = suggestName(); refreshSend(); }
+  } catch (e) { setStatus(`Could not change the subject: ${e.message}`, "err"); }
+  finally { if (run === subjRun) subjBusy = false; }
 }
 
 let searchRun = 0;
@@ -272,6 +307,7 @@ async function chooseJob(j) {
   $("q").value = "";
   $("chosen").textContent = `Job: ${j.jobNumber ? "#" + j.jobNumber + " " : ""}${j.name}`;
   refreshSend();
+  if (subjectPrefixOn()) applySubjectPrefix();
   await loadFolders();
 }
 
@@ -329,7 +365,7 @@ function suggestName() {
   if (!item) return "";
   const d = item.date;
   const day = d.toISOString().slice(0, 10);
-  const subject = (item.subject || "No subject").replace(/[\\/:*?"<>|\r\n]+/g, " ").trim().slice(0, 100);
+  const subject = (stripPrefix(item.subject) || "No subject").replace(/[\\/:*?"<>|\r\n]+/g, " ").trim().slice(0, 100);
   return `${day} - ${subject}`;
 }
 
@@ -578,7 +614,7 @@ $("clearCache").addEventListener("click", () => {
 $("signOut").addEventListener("click", () => {
   jobsCache = null; jobsAt = 0;
   purge((k) => k.startsWith("wb_"));
-  $("key").value = ""; $("base").value = DEFAULT_BASE; $("fmtPdf").checked = true; $("askSend").checked = false;
+  $("key").value = ""; $("base").value = DEFAULT_BASE; $("fmtPdf").checked = true; $("askSend").checked = false; $("subjPrefix").checked = false;
   try { const rs = Office.context.roamingSettings; rs.set("wb_ask", false); rs.saveAsync(() => {}); } catch { /* ignore */ }
   clearJob();
   $("clearNote").textContent = "Your key and all saved data were removed from this computer.";
@@ -737,7 +773,7 @@ let subjectTimer = null;
 function startSubjectWatch() {
   if (subjectTimer) return;
   subjectTimer = setInterval(async () => {
-    if (sending || !cur || !isCompose()) return;
+    if (sending || subjBusy || !cur || !isCompose()) return;
     try {
       const it = Office.context.mailbox.item;
       const subject = await asyncVal((cb) => it.subject.getAsync(cb));
@@ -756,7 +792,7 @@ async function refreshForItem(keepStatus) {
   const snap = await loadSnapshot();
   if (run !== snapRun) return; // another email was selected meanwhile
   cur = snap;
-  nameEdited = false;
+  nameEdited = false; appliedPrefix = "";
   $("name").value = suggestName();
   renderAttachments();
   if (!keepStatus) setStatus("");
@@ -772,6 +808,10 @@ $("askSend").addEventListener("change", () => {
   try { const rs = Office.context.roamingSettings; rs.set("wb_ask", $("askSend").checked); rs.saveAsync(() => {}); } catch { /* settings unavailable */ }
 });
 $("refreshDraft").addEventListener("click", () => { if (!sending) refreshForItem(false); });
+$("subjPrefix").addEventListener("change", () => {
+  store.set("wb_subjprefix", $("subjPrefix").checked ? "1" : "0");
+  applySubjectPrefix(!$("subjPrefix").checked); // switching it off takes the added text back out
+});
 $("fmtPdf").addEventListener("change", () => store.set("wb_fmtpdf", $("fmtPdf").checked ? "1" : "0"));
 
 Office.onReady(async () => {
@@ -782,6 +822,8 @@ Office.onReady(async () => {
   $("key").value = store.get("wb_key") || "";
   $("base").value = store.get("wb_base") || DEFAULT_BASE;
   $("fmtPdf").checked = store.get("wb_fmtpdf") !== "0";
+  $("subjPrefix").checked = store.get("wb_subjprefix") === "1";
+  $("subjRow").hidden = !isCompose();
   try { $("askSend").checked = Office.context.roamingSettings.get("wb_ask") === true; } catch { /* settings unavailable */ }
   if (!$("key").value) $("settings").open = true;
   if (isCompose()) { // writing an email: save the draft rather than a received email
