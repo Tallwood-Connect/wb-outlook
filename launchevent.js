@@ -2,7 +2,7 @@
    If the person has switched on "Ask me to save sent emails", it offers to save the email to Wunderbuild first.
    Safety rule: anything unexpected lets the email send. This must never trap an email.
    Messages starting with [WB] go to the browser console, to help find problems. */
-const WB_LE_VERSION = "1.24";
+const WB_LE_VERSION = "1.25";
 const wbLog = (m) => { try { console.log(`[WB ${WB_LE_VERSION}] ${m}`); } catch (e) { /* no console */ } };
 wbLog("send-time script loaded");
 try { window.addEventListener("error", (e) => wbLog(`script error: ${e && e.message}`)); } catch (e) { /* not a browser page */ }
@@ -32,8 +32,7 @@ function onMessageSendHandler(event) {
           cancelLabel: "Send to Wunderbuild",
           commandId: "wbComposeButton",
         }, "not saved yet");
-        // Leave a note on the draft so the panel opens already expanded when the button is clicked.
-        try { r.value.set("wbOpen", Date.now()); r.value.saveAsync(() => block()); } catch (e) { block(); }
+        block();
       } catch (e) { done({ allowEvent: true }, `error: ${e && e.message}`); }
     });
   } catch (e) { done({ allowEvent: true }, `error: ${e && e.message}`); }

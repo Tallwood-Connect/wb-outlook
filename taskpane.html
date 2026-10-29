@@ -38,8 +38,6 @@
   #dupNote{margin-top:8px;padding:8px 10px;border-left:3px solid var(--bad);background:var(--soft);border-radius:0 4px 4px 0}
   #dupNote:empty{display:none}
   #dupNote.busy{border-left-color:var(--line);color:var(--muted);font-size:12px}
-  #draftNote{margin:10px 0 6px;padding:8px 10px;border-left:3px solid var(--brand);background:var(--soft);border-radius:0 4px 4px 0;font-size:12px}
-  #draftNote[hidden]{display:none}
   #corrNote{margin-top:8px;padding:8px 10px;border-left:3px solid var(--bad);background:var(--soft);border-radius:0 4px 4px 0}
   #corrNote[hidden]{display:none}
   #corrBtn,.sec{display:block;margin-top:6px;padding:5px 10px;border:1px solid var(--accent);border-radius:4px;background:none;color:var(--accent);font:600 13px "Segoe UI",system-ui,sans-serif;cursor:pointer}
@@ -55,19 +53,13 @@
   @keyframes spin{to{transform:rotate(360deg)}}
   @media (prefers-reduced-motion:reduce){.busy::before{animation-duration:2.4s}}
   input:disabled,select:disabled{opacity:.6}
-  #gate[hidden],#panel[hidden]{display:none}
-  #gateBtn{width:100%;margin-top:16px}
+
   #status.err{color:var(--bad)} #status.ok{color:var(--ok)}
 </style>
 </head>
 <body>
-<h1>Send to Wunderbuild <span id="ver" data-v="1.24">v1.24</span></h1>
+<h1>Send to Wunderbuild <span id="ver" data-v="1.25">v1.25</span></h1>
 
-<div id="gate" hidden>
-  <button type="button" id="gateBtn">Save to Wunderbuild</button>
-</div>
-
-<div id="panel">
 <details id="settings">
   <summary>API settings</summary>
   <label for="key">API key (or proxy access token)</label>
@@ -82,9 +74,6 @@
   </div>
   <div id="clearNote" role="status"></div>
 </details>
-
-<div id="draftNote" hidden>This email hasn't been sent yet. It will be saved to Wunderbuild and then sent. The saved copy is rebuilt from your draft.
-  <button type="button" class="sec" id="refreshDraft" hidden>Refresh from draft</button></div>
 
 <label for="q">Job</label>
 <input id="q" type="search" placeholder="Search by job name, number or address">
@@ -103,7 +92,7 @@
 
 <details class="more"><summary>More Info</summary><div>PDF will be saved to the selected location above. The original email will be saved under Outlook Files.</div></details>
 
-<label for="name">File name (no extension)</label>
+<label for="name">File Name (Excluding Extension)</label>
 <input id="name" type="text">
 <details class="more"><summary>More Info</summary><div>A short reference ID is added to the saved file names automatically. It stops the same email being saved twice.</div></details>
 
@@ -115,11 +104,11 @@
 </div>
 
 <button id="send" disabled>Send to Wunderbuild</button>
+<button type="button" class="sec" id="refreshDraft" hidden>Reset</button>
 <div id="status" role="status" aria-live="polite"></div>
-</div>
 
-<script src="pdf.js?v=1.24"></script>
-<script src="eml.js?v=1.24"></script>
-<script src="taskpane.js?v=1.24"></script>
+<script src="pdf.js?v=1.25"></script>
+<script src="eml.js?v=1.25"></script>
+<script src="taskpane.js?v=1.25"></script>
 </body>
 </html>

@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.24"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.25"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -121,7 +121,7 @@ function renderJobList(jobs) {
     b.type = "button";
     b.textContent = `${j.jobNumber ? "#" + j.jobNumber + " " : ""}${j.name || "Untitled job"}`;
     if (j.address) { const s = document.createElement("small"); s.textContent = j.address; b.appendChild(s); }
-    b.addEventListener("click", () => chooseJob(j));
+    b.addEventListener("click", () => { jobAuto = false; chooseJob(j); });
     li.appendChild(b); list.appendChild(li);
   }
 }
@@ -214,6 +214,7 @@ function matchJobs(subject, jobs) {
 }
 
 let matchRun = 0;
+let jobAuto = false; // true while the chosen job was filled in from the subject (so a changed subject may replace it)
 async function autoMatch() {
   const run = ++matchRun, note = $("matchNote");
   note.textContent = "";
@@ -233,6 +234,7 @@ async function autoMatch() {
     const [top, second] = m;
     if (top.s >= 75 && (!second || top.s - second.s >= 15)) {
       if (!job || job._id !== top.j._id) await chooseJob(top.j);
+      jobAuto = true;
       $("autoNote").textContent = "Job filled in from the email subject. Check it is correct.";
     } else {
       renderJobList(m.slice(0, 3).map((x) => x.j));
@@ -243,7 +245,7 @@ async function autoMatch() {
 
 // Forgets the selected job (and its folders) so one email's job never carries over to the next.
 function clearJob() {
-  job = null;
+  job = null; jobAuto = false;
   folderRun++; searchRun++;
   $("chosen").textContent = "";
   $("matchNote").className = ""; $("matchNote").textContent = "";
@@ -735,14 +737,15 @@ let subjectTimer = null;
 function startSubjectWatch() {
   if (subjectTimer) return;
   subjectTimer = setInterval(async () => {
-    if (sending || nameEdited || !cur || !isCompose()) return;
+    if (sending || !cur || !isCompose()) return;
     try {
       const it = Office.context.mailbox.item;
       const subject = await asyncVal((cb) => it.subject.getAsync(cb));
-      if (subject == null || nameEdited || sending || subject === cur.subject) return;
+      if (subject == null || sending || subject === cur.subject) return;
       cur.subject = subject;
-      $("name").value = suggestName();
-      refreshSend();
+      if (!nameEdited) { $("name").value = suggestName(); refreshSend(); }
+      // the subject changed: suggest jobs again, unless a job was picked by hand
+      if (!job || jobAuto) { if (job) clearJob(); autoMatch(); }
     } catch { /* draft closed or Outlook busy: try again next time */ }
   }, 2000);
 }
@@ -782,32 +785,9 @@ Office.onReady(async () => {
   try { $("askSend").checked = Office.context.roamingSettings.get("wb_ask") === true; } catch { /* settings unavailable */ }
   if (!$("key").value) $("settings").open = true;
   if (isCompose()) { // writing an email: save the draft rather than a received email
-    $("draftNote").hidden = false; $("refreshDraft").hidden = false;
+    $("refreshDraft").hidden = false;
     $("send").textContent = "Save and send";
-    // The panel stays blank apart from one button; the options appear when it is clicked.
-    $("panel").hidden = true; $("gate").hidden = false;
-    let opened = false;
-    const openPanel = async () => {
-      if (opened) return;
-      opened = true; clearInterval(gateTimer);
-      $("gate").hidden = true; $("panel").hidden = false;
-      await refreshForItem(false);
-      startSubjectWatch();
-    };
-    // The send-time prompt leaves a note on the draft ("wbOpen") so the panel opens expanded.
-    const checkOpenNote = async () => {
-      try {
-        const props = await asyncVal((cb) => Office.context.mailbox.item.loadCustomPropertiesAsync(cb));
-        const t = props && props.get("wbOpen");
-        if (!t) return;
-        props.remove("wbOpen"); props.saveAsync(() => {}); // used once
-        if (Date.now() - t < 120000) openPanel();
-      } catch { /* not available: the button still works */ }
-    };
-    $("gateBtn").addEventListener("click", openPanel);
-    const gateTimer = setInterval(checkOpenNote, 1000); // also covers a panel that was already open
-    checkOpenNote();
-    return;
+    startSubjectWatch();
   } else {
     // Keep the pane pinned: refresh when another email is selected.
     Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { if (sending) { pendingRefresh = true; return; } refreshForItem(false); });
