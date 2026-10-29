@@ -26,6 +26,9 @@
   #chosen{margin-top:6px;color:var(--accent);font-weight:600}
   #send{width:100%;margin-top:16px;padding:9px;border:0;border-radius:4px;background:var(--brand);color:#fff;font:600 14px "Segoe UI",system-ui,sans-serif;cursor:pointer}
   #send:disabled{opacity:.5;cursor:default}
+  #send.done{background:var(--soft);color:var(--accent);border:1px solid var(--accent)}
+  #send.done:disabled{opacity:1}
+  #send.done::before{content:"";display:inline-block;width:18px;height:18px;margin-right:8px;vertical-align:-4px;background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Ccircle cx='10' cy='10' r='10' fill='%232b976f'/%3E%3Cpath d='M5.5 10.5l3 3 6-6.5' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat}
   .att{display:grid;grid-template-columns:auto 1fr;gap:1px 8px;align-items:center;margin:8px 0}
   .att input[type=checkbox]{width:auto;margin:0}
   .att small{grid-column:2;color:var(--muted)}
@@ -41,7 +44,7 @@
   #subjNote{margin-top:6px;color:var(--bad);font-size:12px}
   #subjNote:empty{display:none}
   #matchNote+#jobs{margin-top:4px}
-  #dupNote{margin-top:8px;padding:8px 10px;border-left:3px solid var(--bad);background:var(--soft);border-radius:0 4px 4px 0}
+  #dupNote{margin-top:8px;padding:8px 10px;border-left:3px solid var(--brand);background:var(--soft);border-radius:0 4px 4px 0}
   #dupNote:empty{display:none}
   #dupNote.busy{border-left-color:var(--line);color:var(--muted);font-size:12px}
   #corrNote{margin-top:8px;padding:8px 10px;border-left:3px solid var(--bad);background:var(--soft);border-radius:0 4px 4px 0}
@@ -51,7 +54,10 @@
   [hidden]{display:none!important}
   #subjBar{display:flex;align-items:center;gap:8px;margin:12px 0 2px;font-size:13px}
   #subjBar .swl{font-weight:600;margin-right:4px}
-  #subjBar .swt{color:var(--muted)} #subjBar .swt.on{color:var(--accent);font-weight:600}
+  #subjBar .swt,#attHead .swt{color:var(--muted)} #subjBar .swt.on,#attHead .swt.on{color:var(--accent);font-weight:600}
+  #attHead{display:flex;align-items:center;gap:8px;margin:14px 0 4px;font-size:13px}
+  #attHead .swl{font-weight:600;margin-right:4px}
+  .att select{grid-column:2;margin-top:3px}
   .switch{position:relative;display:inline-block;width:40px;height:22px;margin:0}
   .switch input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer;z-index:1}
   .switch .track{position:absolute;inset:0;border-radius:11px;background:var(--line);transition:background .15s}
@@ -75,7 +81,7 @@
 </style>
 </head>
 <body>
-<h1>Send to Wunderbuild <span id="ver" data-v="1.40">v1.40</span></h1>
+<h1>Send to Wunderbuild <span id="ver" data-v="1.41">v1.41</span></h1>
 
 <details id="settings">
   <summary>API settings</summary>
@@ -134,9 +140,14 @@
 </div>
 
 <div id="attSection" hidden>
-  <label>Attachments</label>
+  <div id="attHead">
+    <span class="swl">Attachments</span>
+    <span class="swt on" id="swOne">One folder</span>
+    <label class="switch"><input type="checkbox" id="attMode" role="switch" aria-label="Choose a folder for each attachment separately"><span class="track"></span></label>
+    <span class="swt" id="swEach">Individual</span>
+  </div>
   <div id="attList"></div>
-  <label for="attFolder">Save attachments to</label>
+  <label for="attFolder" id="attFolderLabel">Save attachments to</label>
   <select id="attFolder" disabled><option value="">Choose a job first</option></select>
 </div>
 
@@ -144,8 +155,8 @@
 <button type="button" class="sec" id="refreshDraft" hidden>Reset</button>
 <div id="status" role="status" aria-live="polite"></div>
 
-<script src="pdf.js?v=1.40"></script>
-<script src="eml.js?v=1.40"></script>
-<script src="taskpane.js?v=1.40"></script>
+<script src="pdf.js?v=1.41"></script>
+<script src="eml.js?v=1.41"></script>
+<script src="taskpane.js?v=1.41"></script>
 </body>
 </html>

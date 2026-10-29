@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.40"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.41"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -14,8 +14,19 @@ let job = null; // { _id, name }
 
 function setStatus(msg, kind = "") { const s = $("status"); s.textContent = msg; s.className = kind; }
 function base() { return ($("base").value.trim() || DEFAULT_BASE).replace(/\/+$/, ""); }
+// The main button: normal, or a green tick when this email is already saved in the job.
+let dupFound = false;
 function refreshSend() {
-  $("send").disabled = !(job && $("name").value.trim());
+  const ready = !!(job && $("name").value.trim());
+  const compose = isCompose();
+  const attOn = !compose && selectedAttachments().length > 0;
+  const btn = $("send");
+  if (dupFound && !compose && !(attOn && ready)) { btn.textContent = "Sent to Wunderbuild"; btn.className = "done"; btn.disabled = true; }
+  else {
+    btn.className = "";
+    btn.textContent = dupFound && !compose ? "Save attachments" : compose ? "Save and send" : "Send to Wunderbuild";
+    btn.disabled = !ready;
+  }
   $("wbAttachBtn").disabled = !job || sending;
   if (!job) $("wbPick").hidden = true;
 }
@@ -304,6 +315,7 @@ function clearJob() {
     sel.add(new Option("Choose a job first", ""));
     sel.disabled = true;
   }
+  fillAttRowSelects();
   refreshSend();
 }
 
@@ -361,6 +373,7 @@ async function loadFolders() {
   const work = [...af.options].find((o) => /(^|\/ )working documents$/i.test(o.text.trim()));
   af.value = work ? work.value : sel.value;
   sel.disabled = false; af.disabled = false;
+  fillAttRowSelects();
   if (failed) setStatus(failed.message, "err"); else setStatus("");
   refreshSend();
   if (!failed) checkDuplicate();
@@ -686,7 +699,7 @@ async function findExisting(forJob, destFolderId, id) {
 }
 
 let dupRun = 0, justSaved = null; // justSaved = id of the job this email was just saved to
-function resetDup() { dupRun++; $("dupNote").className = ""; $("dupNote").textContent = ""; }
+function resetDup() { dupRun++; dupFound = false; $("dupNote").className = ""; $("dupNote").textContent = ""; }
 async function checkDuplicate() {
   resetDup();
   const run = dupRun, forJob = job, item = cur, note = $("dupNote");
@@ -696,7 +709,12 @@ async function checkDuplicate() {
     const found = await findExisting(forJob, $("folder").value, await emailId(item));
     if (run !== dupRun || job !== forJob) return; // something changed meanwhile
     note.className = ""; note.textContent = "";
-    if (found.length) note.textContent = `This email is already saved in this job (${found[0].name}). Only attachments can be saved again.`;
+    if (found.length) {
+      dupFound = true; // received emails show a green "Sent to Wunderbuild" button instead of a message
+      for (const row of $("attList").children) row.children[0].checked = false; // already filed: tick one again to save it separately
+      if (isCompose()) note.textContent = "This email was already saved to Wunderbuild. Save and send will only send it.";
+      refreshSend();
+    }
   } catch (e) { if (run === dupRun) { note.className = ""; note.textContent = `Could not check for an existing copy: ${e.message}`; } }
 }
 
@@ -722,14 +740,41 @@ function renderAttachments() {
     nm.setAttribute("aria-label", `File name for ${a.name}`);
     const sz = document.createElement("small");
     sz.textContent = `${kb} KB`;
-    row.appendChild(cb); row.appendChild(nm); row.appendChild(sz);
+    cb.addEventListener("change", refreshSend);
+    const fs = document.createElement("select");
+    fs.setAttribute("aria-label", `Folder for ${a.name}`);
+    fs.hidden = true; // shown when each attachment has its own folder
+    fs.addEventListener("change", () => { fs.dataset.touched = "1"; });
+    row.appendChild(cb); row.appendChild(nm); row.appendChild(sz); row.appendChild(fs);
     list.appendChild(row);
   });
+  $("attMode").checked = false; // one folder for all is the standard
+  syncAttMode();
+  fillAttRowSelects();
+}
+// Every attachment's folder list is a copy of the "Save attachments to" list.
+function fillAttRowSelects() {
+  const src = $("attFolder");
+  for (const row of $("attList").children) {
+    const sel = row.children[3];
+    if (!sel) continue;
+    const keep = sel.dataset.touched ? sel.value : null;
+    sel.innerHTML = "";
+    for (const o of src.options) sel.add(new Option(o.text, o.value));
+    sel.value = keep !== null && [...sel.options].some((o) => o.value === keep) ? keep : src.value;
+    sel.disabled = src.disabled;
+  }
+}
+function syncAttMode() {
+  const each = $("attMode").checked;
+  $("swOne").classList.toggle("on", !each); $("swEach").classList.toggle("on", each);
+  $("attFolder").hidden = each; $("attFolderLabel").hidden = each;
+  for (const row of $("attList").children) if (row.children[3]) row.children[3].hidden = !each;
 }
 // Rows are in the same order as currentAtts: [checkbox, name box, size].
 function selectedAttachments() {
   return [...$("attList").children]
-    .map((row, i) => ({ att: currentAtts[i], on: row.children[0].checked, typed: row.children[1].value }))
+    .map((row, i) => ({ att: currentAtts[i], on: row.children[0].checked, typed: row.children[1].value, cb: row.children[0], folder: row.children[3] ? row.children[3].value : "" }))
     .filter((r) => r.on);
 }
 // Cleans the typed name and keeps the original file type if the new name has no extension.
@@ -824,7 +869,7 @@ let sending = false, pendingRefresh = false;
 function lockUI(on) {
   $("q").disabled = on; $("name").disabled = on; $("wbAttachBtn").disabled = on || !job; $("wbClearBtn").disabled = on; $("pickGo").disabled = on;
   $("folder").disabled = on || !job; $("attFolder").disabled = on || !job;
-  for (const el of $("attList").querySelectorAll("input")) el.disabled = on;
+  for (const el of $("attList").querySelectorAll("input,select")) el.disabled = on;
   for (const el of $("jobs").querySelectorAll("button")) el.disabled = on;
 }
 
@@ -877,7 +922,8 @@ $("send").addEventListener("click", async () => {
     const useFmt = $("fmtPdf").checked;
     const memo = new Map();
     const readAtt = (a) => { if (!memo.has(a.id)) memo.set(a.id, getAttachment(a).then((f) => ({ f }), (e) => ({ e }))); return memo.get(a.id); };
-    const reads = atts.map(({ att, typed }) => readAtt(att).then((r) => ({ att, typed, f: r.f, e: r.e })));
+    const perFile = $("attMode").checked; // a folder chosen for each attachment, or one folder for all
+    const reads = atts.map(({ att, typed, cb, folder }) => readAtt(att).then((r) => ({ att, typed, cb, folder, f: r.f, e: r.e })));
     const inlineAtts = snap.attachments.filter((a) => a.isInline && attType(a).startsWith("image/") && (a.size || 0) < 5 * 1024 * 1024);
     const inlineReads = useFmt ? inlineAtts.map((a) => readAtt(a).then((r) => (r.f ? { a, f: r.f } : null))) : [];
     const [bodyText, bodyHtml, emlB64, ...rest] = await Promise.all([getBodyText(), (useFmt || snap.compose) ? getBodyHtml() : Promise.resolve(""), snap.compose ? null : getEml(), ...reads, ...inlineReads]);
@@ -922,8 +968,8 @@ $("send").addEventListener("click", async () => {
       if (!r.f) { problems.push(`${r.att.name}: ${r.e.message}`); continue; }
       try {
         setStatus(`Saving attachment ${++n} of ${atts.length}…`, "busy");
-        await uploadFile(finalName(r.typed, r.f.name), r.f.type, r.f.bytes, attFolderId);
-        savedAtts++;
+        await uploadFile(finalName(r.typed, r.f.name), r.f.type, r.f.bytes, perFile ? r.folder : attFolderId);
+        savedAtts++; r.cb.checked = false; // done: no need to save it again
       } catch (e) { problems.push(`${r.att.name}: ${e.message}`); }
     }
 
@@ -940,8 +986,9 @@ $("send").addEventListener("click", async () => {
       msg = `Saved. PDF in ${folderLabel}.`;
       if (!problems.some((p) => p.startsWith("original"))) msg += ` Original email in ${folderLabel} / Outlook Files.`;
     }
-    if (atts.length) msg += ` ${savedAtts} of ${atts.length} attachment${atts.length === 1 ? "" : "s"} in ${attFolderLabel}.`;
+    if (atts.length) msg += ` ${savedAtts} of ${atts.length} attachment${atts.length === 1 ? "" : "s"} in ${perFile ? "the chosen folders" : attFolderLabel}.`;
     if (problems.length) msg += ` Problems: ${problems.join("; ")}.`;
+    if (!snap.compose && !problems.length) dupFound = true; // everything saved: the button turns into the green "Sent to Wunderbuild"
     const wantSend = snap.compose; // a draft is always sent as it is saved, so the saved copy matches what went out
     if (wantSend && problems.length) {
       msg += " The email has NOT been sent because of the problems above. Fix them, or send it yourself.";
@@ -1031,6 +1078,13 @@ $("subjPrefix").addEventListener("change", () => {
   store.set("wb_subjprefix", $("subjPrefix").checked ? "1" : "0");
   applySubjectPrefix(!$("subjPrefix").checked); // switching it off takes the added text back out
 });
+$("attMode").addEventListener("change", () => {
+  syncAttMode();
+  if ($("attMode").checked) for (const row of $("attList").children) { // start each one at the folder already chosen above
+    const sel = row.children[3];
+    if (sel && !sel.dataset.touched) sel.value = $("attFolder").value;
+  }
+});
 $("wbClearBtn").addEventListener("click", async () => {
   if (sending) return;
   sending = true; lockUI(true);
@@ -1056,7 +1110,7 @@ function applyMode() {
   $("subjBar").hidden = !compose; syncSwitch();
   $("refreshDraft").hidden = !compose;
   $("wbAttach").hidden = !compose;
-  $("send").textContent = compose ? "Save and send" : "Send to Wunderbuild";
+  refreshSend();
   if (compose) startSubjectWatch();
 }
 
