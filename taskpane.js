@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.37"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.38"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -14,7 +14,11 @@ let job = null; // { _id, name }
 
 function setStatus(msg, kind = "") { const s = $("status"); s.textContent = msg; s.className = kind; }
 function base() { return ($("base").value.trim() || DEFAULT_BASE).replace(/\/+$/, ""); }
-function refreshSend() { $("send").disabled = !(job && $("name").value.trim()); }
+function refreshSend() {
+  $("send").disabled = !(job && $("name").value.trim());
+  $("wbAttachBtn").disabled = !job || sending;
+  if (!job) $("wbPick").hidden = true;
+}
 
 async function api(path, opts = {}) {
   const key = $("key").value.trim();
@@ -436,6 +440,86 @@ function buildCidMap(html, inl) {
   return map;
 }
 
+/* ---------- attach files from Wunderbuild (emails being written only) ---------- */
+const MAX_ATTACH = 20 * 1024 * 1024; // keeps clear of Outlook's own attachment limits
+let pickRun = 0, pickDocs = [];
+const sizeText = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round((n || 0) / 1024))} KB`);
+function setPickStatus(msg, cls) { $("pickStatus").textContent = msg || ""; $("pickStatus").className = cls || ""; }
+function updatePickGo() { $("pickGo").disabled = sending || ![...$("pickList").querySelectorAll("input")].some((c) => c.checked && !c.disabled); }
+
+async function loadPickList() {
+  const run = ++pickRun, forJob = job, list = $("pickList");
+  list.textContent = ""; pickDocs = []; updatePickGo();
+  if (!forJob) return;
+  try {
+    setPickStatus("Loading files…", "busy");
+    const docs = (await listDocs(forJob._id, $("pickFolder").value)).sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: "base" }));
+    if (run !== pickRun || job !== forJob) return;
+    pickDocs = docs;
+    setPickStatus(docs.length ? "" : "No files in this folder.");
+    docs.forEach((d, i) => {
+      const row = document.createElement("div"); row.className = "att";
+      const cb = document.createElement("input"); cb.type = "checkbox"; cb.setAttribute("aria-label", `Attach ${d.name}`);
+      cb.addEventListener("change", updatePickGo);
+      const nm = document.createElement("span"); nm.textContent = d.name;
+      const sz = document.createElement("small"); sz.textContent = sizeText(d.size);
+      row.appendChild(cb); row.appendChild(nm); row.appendChild(sz); list.appendChild(row);
+    });
+  } catch (e) { if (run === pickRun) setPickStatus(e.message, "err"); }
+}
+function openPicker() {
+  if (!job) return;
+  const box = $("wbPick");
+  if (!box.hidden) { box.hidden = true; return; }
+  const sel = $("pickFolder");
+  sel.innerHTML = "";
+  for (const o of $("folder").options) sel.add(new Option(o.text, o.value));
+  const work = [...sel.options].find((o) => /(^|\/ )working documents$/i.test(o.text.trim()));
+  sel.value = work ? work.value : "";
+  box.hidden = false; setPickStatus("");
+  loadPickList();
+}
+// Downloads a file from a signed link, through the proxy when the storage site refuses the browser (CORS).
+async function fetchBytes(url) {
+  let res;
+  try { res = await fetch(url); }
+  catch { res = await fetch(base().replace(/\/api$/, "") + "/download", { headers: { "x-api-key": $("key").value.trim(), "x-download-url": url } }); }
+  if (!res.ok) throw new Error(`download failed (${res.status})`);
+  return new Uint8Array(await res.arrayBuffer());
+}
+function addAttachment(b64, name) {
+  return new Promise((resolve, reject) => {
+    const it = Office.context.mailbox.item;
+    if (!it || typeof it.addFileAttachmentFromBase64Async !== "function") return reject(new Error("this version of Outlook cannot attach files from the add-in"));
+    it.addFileAttachmentFromBase64Async(b64, name, { isInline: false }, (r) => (r.status === Office.AsyncResultStatus.Succeeded ? resolve() : reject(new Error((r.error && r.error.message) || "Outlook refused"))));
+  });
+}
+async function attachPicked() {
+  const forJob = job;
+  const rows = [...$("pickList").children];
+  const chosen = rows.map((row, i) => ({ row, cb: row.children[0], d: pickDocs[i] })).filter((x) => x.cb.checked && !x.cb.disabled);
+  if (!forJob || !chosen.length || sending) return;
+  sending = true; lockUI(true); $("pickFolder").disabled = true;
+  const failed = []; let done = 0;
+  try {
+    for (const x of chosen) {
+      setPickStatus(`Attaching ${done + failed.length + 1} of ${chosen.length}: ${x.d.name}…`, "busy");
+      try {
+        if ((x.d.size || 0) > MAX_ATTACH) throw new Error(`too large (${sizeText(x.d.size)}; the limit is ${sizeText(MAX_ATTACH)})`);
+        const info = await api(`/documents/job/${forJob._id}/${x.d._id}/download-url`);
+        const bytes = await fetchBytes(info.url);
+        if (bytes.length > MAX_ATTACH) throw new Error(`too large (${sizeText(bytes.length)})`);
+        await addAttachment(bytesToB64(bytes), info.name || x.d.name);
+        done++; x.cb.checked = false; x.cb.disabled = true; x.row.children[1].textContent = `${x.d.name} (attached)`;
+      } catch (e) { failed.push(`${x.d.name}: ${e.message}`); }
+    }
+  } finally {
+    sending = false; lockUI(false); $("pickFolder").disabled = false; refreshSend(); updatePickGo();
+    if (pendingRefresh) { pendingRefresh = false; refreshForItem(true); }
+  }
+  setPickStatus(`${done ? `Attached ${done} file${done === 1 ? "" : "s"} to your email. ` : ""}${failed.length ? `Not attached: ${failed.join("; ")}` : ""}`, failed.length ? "err" : "ok");
+}
+
 // Email header block + the email's own HTML. Scripts are removed, and inline (cid:) images are embedded.
 function buildEmailHtml({ subject, meta, bodyHtml, cid }) {
   let body = String(bodyHtml || "").replace(/<script[\s\S]*?<\/script>/gi, "");
@@ -532,7 +616,8 @@ async function checkDuplicate() {
 /* ---------- attachments ---------- */
 let currentAtts = [];
 function renderAttachments() {
-  currentAtts = ((cur && cur.attachments) || []).filter((a) => !a.isInline);
+  // An email being written already carries its attachments (they are kept in the saved .eml), so only received emails offer to save them.
+  currentAtts = (cur && !cur.compose ? cur.attachments || [] : []).filter((a) => !a.isInline);
   const box = $("attSection"), list = $("attList");
   list.innerHTML = "";
   box.hidden = currentAtts.length === 0;
@@ -650,7 +735,7 @@ $("signOut").addEventListener("click", () => {
 
 let sending = false, pendingRefresh = false;
 function lockUI(on) {
-  $("q").disabled = on; $("name").disabled = on;
+  $("q").disabled = on; $("name").disabled = on; $("wbAttachBtn").disabled = on || !job; $("pickGo").disabled = on;
   $("folder").disabled = on || !job; $("attFolder").disabled = on || !job;
   for (const el of $("attList").querySelectorAll("input")) el.disabled = on;
   for (const el of $("jobs").querySelectorAll("button")) el.disabled = on;
@@ -846,6 +931,9 @@ $("subjPrefix").addEventListener("change", () => {
   store.set("wb_subjprefix", $("subjPrefix").checked ? "1" : "0");
   applySubjectPrefix(!$("subjPrefix").checked); // switching it off takes the added text back out
 });
+$("wbAttachBtn").addEventListener("click", () => { if (!sending) openPicker(); });
+$("pickFolder").addEventListener("change", () => { if (!sending) loadPickList(); });
+$("pickGo").addEventListener("click", attachPicked);
 $("fmtPdf").addEventListener("change", () => store.set("wb_fmtpdf", $("fmtPdf").checked ? "1" : "0"));
 
 // Shows the controls that belong to the item in front of the person: a received email or one being written.
@@ -853,6 +941,7 @@ function applyMode() {
   const compose = isCompose();
   $("subjBar").hidden = !compose; syncSwitch();
   $("refreshDraft").hidden = !compose;
+  $("wbAttach").hidden = !compose;
   $("send").textContent = compose ? "Save and send" : "Send to Wunderbuild";
   if (compose) startSubjectWatch();
 }
