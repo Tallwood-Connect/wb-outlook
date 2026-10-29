@@ -30,7 +30,6 @@
   .att input[type=checkbox]{width:auto;margin:0}
   .att small{grid-column:2;color:var(--muted)}
   #wbPick{margin-top:6px;padding:8px 10px;border:1px solid var(--line);border-radius:4px;background:var(--soft)}
-  #wbPick label:first-child{margin-top:0}
   #pickList{max-height:220px;overflow:auto;margin-top:8px}
   #pickStatus{margin-top:6px;font-size:12px;color:var(--muted)} #pickStatus.err{color:var(--bad)} #pickStatus.ok{color:var(--ok)}
   #pickGo{width:100%}
@@ -76,7 +75,7 @@
 </style>
 </head>
 <body>
-<h1>Send to Wunderbuild <span id="ver" data-v="1.38">v1.38</span></h1>
+<h1>Send to Wunderbuild <span id="ver" data-v="1.39">v1.39</span></h1>
 
 <details id="settings">
   <summary>API settings</summary>
@@ -121,7 +120,9 @@
 <div id="wbAttach" hidden>
   <button type="button" class="sec" id="wbAttachBtn" disabled>Attach files from Wunderbuild</button>
   <div id="wbPick" hidden>
-    <label for="pickFolder">Folder</label>
+    <label for="pickQ" style="margin-top:0">Search file names in this job</label>
+    <input id="pickQ" type="search" placeholder="Type part of a file name" autocomplete="off">
+    <label for="pickFolder">Or browse a folder</label>
     <select id="pickFolder"></select>
     <div id="pickList" role="group" aria-label="Files in this folder"></div>
     <div class="btns">
@@ -142,8 +143,8 @@
 <button type="button" class="sec" id="refreshDraft" hidden>Reset</button>
 <div id="status" role="status" aria-live="polite"></div>
 
-<script src="pdf.js?v=1.38"></script>
-<script src="eml.js?v=1.38"></script>
-<script src="taskpane.js?v=1.38"></script>
+<script src="pdf.js?v=1.39"></script>
+<script src="eml.js?v=1.39"></script>
+<script src="taskpane.js?v=1.39"></script>
 </body>
 </html>
