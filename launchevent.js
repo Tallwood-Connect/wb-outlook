@@ -28,8 +28,8 @@ function onMessageSendHandler(event) {
         if (r.value.get("wbSaved") === true) return done({ allowEvent: true }, "already saved");
         done({
           allowEvent: false,
-          errorMessage: "Do you want to save this email to Wunderbuild before it is sent? Choose Save and send to save it and send it, or Send Anyway to send without saving.",
-          cancelLabel: "Save and send",
+          errorMessage: "Would you like to save this email to Wunderbuild?",
+          cancelLabel: "Send to Wunderbuild",
           commandId: "wbComposeButton",
         }, "not saved yet");
       } catch (e) { done({ allowEvent: true }, `error: ${e && e.message}`); }

@@ -727,6 +727,25 @@ $("send").addEventListener("click", async () => {
 
 // Called when a different email is selected in the pinned panel (or the draft is refreshed).
 let snapRun = 0;
+let nameEdited = false; // true once the person types in the file name box themselves
+
+// Outlook has no "subject changed" event, so while a draft's options are showing the subject is
+// checked every couple of seconds and the file name follows it (until the name is edited by hand).
+let subjectTimer = null;
+function startSubjectWatch() {
+  if (subjectTimer) return;
+  subjectTimer = setInterval(async () => {
+    if (sending || nameEdited || !cur || !isCompose()) return;
+    try {
+      const it = Office.context.mailbox.item;
+      const subject = await asyncVal((cb) => it.subject.getAsync(cb));
+      if (subject == null || nameEdited || sending || subject === cur.subject) return;
+      cur.subject = subject;
+      $("name").value = suggestName();
+      refreshSend();
+    } catch { /* draft closed or Outlook busy: try again next time */ }
+  }, 2000);
+}
 async function refreshForItem(keepStatus) {
   const run = ++snapRun;
   justSaved = null;
@@ -734,6 +753,7 @@ async function refreshForItem(keepStatus) {
   const snap = await loadSnapshot();
   if (run !== snapRun) return; // another email was selected meanwhile
   cur = snap;
+  nameEdited = false;
   $("name").value = suggestName();
   renderAttachments();
   if (!keepStatus) setStatus("");
@@ -743,7 +763,7 @@ async function refreshForItem(keepStatus) {
 const loadSnapshot = () => (isCompose() ? loadDraftSnapshot() : Promise.resolve(readSnapshot()));
 
 /* ---------- init ---------- */
-$("name").addEventListener("input", refreshSend);
+$("name").addEventListener("input", () => { nameEdited = true; refreshSend(); });
 ["key", "base"].forEach((id) => $(id).addEventListener("change", () => store.set("wb_" + id, $(id).value.trim())));
 $("askSend").addEventListener("change", () => {
   try { const rs = Office.context.roamingSettings; rs.set("wb_ask", $("askSend").checked); rs.saveAsync(() => {}); } catch { /* settings unavailable */ }
@@ -764,6 +784,14 @@ Office.onReady(async () => {
   if (isCompose()) { // writing an email: save the draft rather than a received email
     $("draftNote").hidden = false; $("refreshDraft").hidden = false;
     $("send").textContent = "Save and send";
+    // The panel stays blank apart from one button; the options appear when it is clicked.
+    $("panel").hidden = true; $("gate").hidden = false;
+    $("gateBtn").addEventListener("click", async () => {
+      $("gate").hidden = true; $("panel").hidden = false;
+      await refreshForItem(false);
+      startSubjectWatch();
+    });
+    return;
   } else {
     // Keep the pane pinned: refresh when another email is selected.
     Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { if (sending) { pendingRefresh = true; return; } refreshForItem(false); });
