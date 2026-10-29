@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.42"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.43"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -733,7 +733,12 @@ function renderAttachments() {
     // Tick everything except tiny images (usually signature logos).
     cb.checked = !(attType(a).startsWith("image/") && (a.size || 0) < 20480);
     const nm = document.createElement("input");
-    nm.type = "text"; nm.value = a.name || "attachment"; nm.spellcheck = false;
+    // The file extension is shown (in green) at the right of the box and kept as it is, so only the name is edited.
+    const full = a.name || "attachment";
+    const em = /\.[A-Za-z0-9]{1,10}$/.exec(full);
+    const extText = em && em.index > 0 ? em[0] : "";
+    nm.type = "text"; nm.value = extText ? full.slice(0, -extText.length) : full; nm.spellcheck = false;
+    if (extText) nm.style.paddingRight = `${extText.length + 2}ch`;
     nm.setAttribute("aria-label", `File name for ${a.name}`);
     const sz = document.createElement("small");
     sz.textContent = `${kb} KB`;
@@ -743,6 +748,7 @@ function renderAttachments() {
     fs.hidden = true; // shown when each attachment has its own folder
     fs.addEventListener("change", () => { fs.dataset.touched = "1"; });
     row.appendChild(cb); row.appendChild(nm); row.appendChild(sz); row.appendChild(fs);
+    if (extText) { const ex = document.createElement("span"); ex.className = "ext"; ex.textContent = extText; row.appendChild(ex); }
     list.appendChild(row);
   });
   $("attMode").checked = false; // one folder for all is the standard
@@ -775,12 +781,11 @@ function selectedAttachments() {
     .filter((r) => r.on);
 }
 // Cleans the typed name and keeps the original file type if the new name has no extension.
-function finalName(typed, original) {
-  let n = (typed || "").trim().replace(/[\\/:*?"<>|]+/g, "_");
-  if (!n) n = original;
+function finalName(typed, original) { // the typed name plus the original file's extension
   const ext = (original.match(/\.[A-Za-z0-9]{1,10}$/) || [""])[0];
-  if (ext && !/\.[A-Za-z][A-Za-z0-9]{0,9}$/.test(n)) n += ext;
-  return n;
+  const stem = ext ? original.slice(0, -ext.length) : original;
+  const n = (typed || "").trim().replace(/[\\/:*?"<>|]+/g, "_") || stem;
+  return ext && n.toLowerCase().endsWith(ext.toLowerCase()) ? n : n + ext;
 }
 // Emails being written do not report an attachment's type, so it is worked out from the file extension.
 const EXT_TYPES = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", jpe: "image/jpeg", gif: "image/gif", bmp: "image/bmp", webp: "image/webp", svg: "image/svg+xml", tif: "image/tiff", tiff: "image/tiff", pdf: "application/pdf" };

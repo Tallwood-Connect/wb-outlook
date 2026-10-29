@@ -30,7 +30,9 @@
   #send.done:disabled{opacity:1}
   #send.done::before{content:"";display:inline-block;width:18px;height:18px;margin-right:8px;vertical-align:-4px;background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Ccircle cx='10' cy='10' r='10' fill='%232b976f'/%3E%3Cpath d='M5.5 10.5l3 3 6-6.5' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat}
   .att{display:grid;grid-template-columns:auto 1fr;gap:1px 8px;align-items:center;margin:8px 0}
-  .att input[type=checkbox]{width:auto;margin:0}
+  .att input[type=checkbox]{width:auto;margin:0;grid-column:1;grid-row:1}
+  .att input[type=text]{grid-column:2;grid-row:1}
+  .att .ext{grid-column:2;grid-row:1;justify-self:end;margin-right:10px;color:var(--brand);font-weight:600;pointer-events:none}
   .att small{grid-column:2;color:var(--muted)}
   #wbPick{margin-top:6px;padding:8px 10px;border:1px solid var(--line);border-radius:4px;background:var(--soft)}
   #pickList{max-height:220px;overflow:auto;margin-top:8px}
@@ -80,7 +82,7 @@
 </style>
 </head>
 <body>
-<h1>Send to Wunderbuild <span id="ver" data-v="1.42">v1.42</span></h1>
+<h1>Send to Wunderbuild <span id="ver" data-v="1.43">v1.43</span></h1>
 
 <details id="settings">
   <summary>API settings</summary>
@@ -154,8 +156,8 @@
 <button type="button" class="sec" id="refreshDraft" hidden>Reset</button>
 <div id="status" role="status" aria-live="polite"></div>
 
-<script src="pdf.js?v=1.42"></script>
-<script src="eml.js?v=1.42"></script>
-<script src="taskpane.js?v=1.42"></script>
+<script src="pdf.js?v=1.43"></script>
+<script src="eml.js?v=1.43"></script>
+<script src="taskpane.js?v=1.43"></script>
 </body>
 </html>
