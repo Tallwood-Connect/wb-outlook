@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.21"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.22"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -60,14 +60,45 @@ function pruneConv() {
 }
 const fmtDate = (t) => new Date(t).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" });
 
+/* ---------- the open email (read mode) or draft (compose mode) ---------- */
+const isCompose = () => { const it = Office.context.mailbox.item; return !!it && typeof it.subject === "object"; };
+let cur = null; // snapshot of the email the panel is showing
+const asyncVal = (fn) => new Promise((resolve) => { try { fn((r) => resolve(r.status === Office.AsyncResultStatus.Succeeded ? r.value : undefined)); } catch { resolve(undefined); } });
+const newId = () => {
+  const a = new Uint8Array(5);
+  try { crypto.getRandomValues(a); } catch { for (let i = 0; i < a.length; i++) a[i] = Math.floor(Math.random() * 256); }
+  return [...a].map((b) => b.toString(16).padStart(2, "0")).join("");
+};
+function readSnapshot() { // an email being read: all details are available straight away
+  const it = Office.context.mailbox.item;
+  if (!it) return null;
+  return { compose: false, subject: it.subject || "", from: it.from, to: it.to || [], cc: it.cc || [], bcc: [],
+    date: it.dateTimeCreated ? new Date(it.dateTimeCreated) : new Date(), attachments: it.attachments || [],
+    conversationId: it.conversationId, internetMessageId: it.internetMessageId, wbId: null, props: null };
+}
+async function loadDraftSnapshot() { // an email being written: details are read from Outlook one by one
+  const it = Office.context.mailbox.item;
+  if (!it) return null;
+  const [subject, from, to, cc, bcc, atts, props] = await Promise.all([
+    asyncVal((cb) => it.subject.getAsync(cb)), asyncVal((cb) => it.from.getAsync(cb)),
+    asyncVal((cb) => it.to.getAsync(cb)), asyncVal((cb) => it.cc.getAsync(cb)), asyncVal((cb) => it.bcc.getAsync(cb)),
+    asyncVal((cb) => it.getAttachmentsAsync(cb)), asyncVal((cb) => it.loadCustomPropertiesAsync(cb)),
+  ]);
+  let wbId = props ? props.get("wbId") : null; // a draft's own reference, kept on the draft so saving twice is recognised
+  if (!wbId) { wbId = newId(); if (props) { props.set("wbId", wbId); props.saveAsync(() => {}); } }
+  const me = Office.context.mailbox.userProfile;
+  return { compose: true, subject: subject || "", from: from || (me ? { displayName: me.displayName, emailAddress: me.emailAddress } : null),
+    to: to || [], cc: cc || [], bcc: bcc || [], date: new Date(), attachments: atts || [],
+    conversationId: undefined, internetMessageId: undefined, wbId, props };
+}
+
 // Runs whenever an email is opened: fills in the job from an earlier email in the same
 // conversation (saved on this computer), or else from the subject.
 let fillRun = 0;
 async function smartFill() {
   const run = ++fillRun;
-  const item = Office.context.mailbox.item;
-  if (!item) return;
-  const rec = job ? null : getConvRecord(item.conversationId);
+  if (!cur) return;
+  const rec = job ? null : getConvRecord(cur.conversationId);
   if (rec) {
     await chooseJob(rec.j);
     if (run !== fillRun) return; // another email was selected meanwhile
@@ -186,7 +217,7 @@ let matchRun = 0;
 async function autoMatch() {
   const run = ++matchRun, note = $("matchNote");
   note.textContent = "";
-  const item = Office.context.mailbox.item;
+  const item = cur;
   note.className = "";
   if (!$("key").value.trim() || !item || !item.subject) return;
   try {
@@ -292,9 +323,9 @@ function b64ToBytes(b64) {
   return out;
 }
 function suggestName() {
-  const item = Office.context.mailbox.item;
+  const item = cur;
   if (!item) return "";
-  const d = item.dateTimeCreated ? new Date(item.dateTimeCreated) : new Date();
+  const d = item.date;
   const day = d.toISOString().slice(0, 10);
   const subject = (item.subject || "No subject").replace(/[\\/:*?"<>|\r\n]+/g, " ").trim().slice(0, 100);
   return `${day} - ${subject}`;
@@ -308,14 +339,13 @@ function getBodyText() {
 }
 const fmtAddr = (a) => (a ? (a.displayName && a.displayName !== a.emailAddress ? `${a.displayName} <${a.emailAddress}>` : a.emailAddress) : "");
 const fmtList = (l) => (Array.isArray(l) ? l.map(fmtAddr).filter(Boolean).join("; ") : "");
-function emailMeta() {
-  const item = Office.context.mailbox.item;
+function emailMeta(item = cur) {
   const atts = (item.attachments || []).filter((a) => !a.isInline).map((a) => `${a.name} (${Math.max(1, Math.round(a.size / 1024))} KB)`);
   return [
     ["From:", fmtAddr(item.from)],
     ["To:", fmtList(item.to)],
     ["Cc:", fmtList(item.cc)],
-    ["Date:", item.dateTimeCreated ? new Date(item.dateTimeCreated).toLocaleString("en-AU") : ""],
+    ["Date:", item.date ? item.date.toLocaleString("en-AU") : ""],
     ["Attach:", atts.join("; ")],
   ];
 }
@@ -384,7 +414,8 @@ async function emailId(item) {
   // Runs straight away (no waiting), so it reads the email that is open right now.
   return hash40((item.internetMessageId
     ? String(item.internetMessageId).trim()
-    : [fmtAddr(item.from), item.dateTimeCreated ? new Date(item.dateTimeCreated).toISOString() : "", item.subject || ""].join("|")
+    : item.wbId ? String(item.wbId)
+    : [fmtAddr(item.from), item.date ? item.date.toISOString() : "", item.subject || ""].join("|")
   ).toLowerCase());
 }
 
@@ -413,7 +444,7 @@ let dupRun = 0, justSaved = null; // justSaved = id of the job this email was ju
 function resetDup() { dupRun++; $("dupNote").className = ""; $("dupNote").textContent = ""; }
 async function checkDuplicate() {
   resetDup();
-  const run = dupRun, forJob = job, item = Office.context.mailbox.item, note = $("dupNote");
+  const run = dupRun, forJob = job, item = cur, note = $("dupNote");
   if (!forJob || !item || justSaved === forJob._id) return; // no "already saved" note straight after saving it
   note.className = "busy"; note.textContent = "Checking whether this email is already saved…";
   try {
@@ -427,8 +458,7 @@ async function checkDuplicate() {
 /* ---------- attachments ---------- */
 let currentAtts = [];
 function renderAttachments() {
-  const item = Office.context.mailbox.item;
-  currentAtts = ((item && item.attachments) || []).filter((a) => !a.isInline);
+  currentAtts = ((cur && cur.attachments) || []).filter((a) => !a.isInline);
   const box = $("attSection"), list = $("attList");
   list.innerHTML = "";
   box.hidden = currentAtts.length === 0;
@@ -546,7 +576,8 @@ $("clearCache").addEventListener("click", () => {
 $("signOut").addEventListener("click", () => {
   jobsCache = null; jobsAt = 0;
   purge((k) => k.startsWith("wb_"));
-  $("key").value = ""; $("base").value = DEFAULT_BASE; $("fmtPdf").checked = true;
+  $("key").value = ""; $("base").value = DEFAULT_BASE; $("fmtPdf").checked = true; $("askSend").checked = false;
+  try { const rs = Office.context.roamingSettings; rs.set("wb_ask", false); rs.saveAsync(() => {}); } catch { /* ignore */ }
   clearJob();
   $("clearNote").textContent = "Your key and all saved data were removed from this computer.";
 });
@@ -557,6 +588,24 @@ function lockUI(on) {
   $("folder").disabled = on || !job; $("attFolder").disabled = on || !job;
   for (const el of $("attList").querySelectorAll("input")) el.disabled = on;
   for (const el of $("jobs").querySelectorAll("button")) el.disabled = on;
+}
+
+// Rebuilds an .eml from a draft (Outlook cannot export a draft). Cloud-linked attachments cannot be included.
+async function buildDraftEml(snap, bodyHtml, bodyText, readAtt) {
+  const parts = []; let skipped = 0;
+  for (const a of snap.attachments) {
+    const r = await readAtt(a);
+    if (r.f) parts.push({ name: r.f.name || a.name, type: r.f.type, bytes: r.f.bytes, isInline: a.isInline });
+    else skipped++;
+  }
+  return { bytes: buildEml({ id: snap.wbId, from: snap.from, to: snap.to, cc: snap.cc, bcc: snap.bcc, subject: snap.subject,
+    date: new Date(), bodyHtml, bodyText, attachments: parts }), skipped };
+}
+function markSaved(snap) { // lets the send-time prompt know this draft has been saved
+  return new Promise((resolve) => {
+    if (!snap.compose || !snap.props) return resolve();
+    try { snap.props.set("wbSaved", true); snap.props.saveAsync(() => resolve()); } catch { resolve(); }
+  });
 }
 
 $("folder").addEventListener("change", () => { if (job && !sending) checkDuplicate(); });
@@ -572,17 +621,25 @@ $("send").addEventListener("click", async () => {
     const problems = [];
 
     // Read everything from the open email first, in one go, so clicking another email cannot mix things up.
-    setStatus("Reading email…", "busy");
-    const item = Office.context.mailbox.item, subject = item.subject, meta = emailMeta();
-    const convId = item.conversationId, jobAtSend = job;
-    const idPromise = emailId(item); // identity of the email that is open right now
+    setStatus(isCompose() ? "Reading your draft…" : "Reading email…", "busy");
+    const snap = isCompose() ? await loadDraftSnapshot() : readSnapshot(); // a read email is captured instantly
+    const subject = snap.subject, meta = emailMeta(snap);
+    const convId = snap.conversationId, jobAtSend = job;
+    const idPromise = emailId(snap); // identity of the email that is open right now
     const useFmt = $("fmtPdf").checked;
-    const reads = atts.map(({ att, typed }) => getAttachment(att).then((f) => ({ att, typed, f }), (e) => ({ att, e })));
-    const inlineAtts = (item.attachments || []).filter((a) => a.isInline && (a.contentType || "").startsWith("image/") && (a.size || 0) < 5 * 1024 * 1024);
-    const inlineReads = useFmt ? inlineAtts.map((a) => getAttachment(a).then((f) => ({ a, f }), () => null)) : [];
-    const [bodyText, emlB64, bodyHtml, ...rest] = await Promise.all([getBodyText(), getEml(), useFmt ? getBodyHtml() : Promise.resolve(""), ...reads, ...inlineReads]);
+    const memo = new Map();
+    const readAtt = (a) => { if (!memo.has(a.id)) memo.set(a.id, getAttachment(a).then((f) => ({ f }), (e) => ({ e }))); return memo.get(a.id); };
+    const reads = atts.map(({ att, typed }) => readAtt(att).then((r) => ({ att, typed, f: r.f, e: r.e })));
+    const inlineAtts = snap.attachments.filter((a) => a.isInline && (a.contentType || "").startsWith("image/") && (a.size || 0) < 5 * 1024 * 1024);
+    const inlineReads = useFmt ? inlineAtts.map((a) => readAtt(a).then((r) => (r.f ? { a, f: r.f } : null))) : [];
+    const [bodyText, bodyHtml, emlB64, ...rest] = await Promise.all([getBodyText(), (useFmt || snap.compose) ? getBodyHtml() : Promise.resolve(""), snap.compose ? null : getEml(), ...reads, ...inlineReads]);
     const got = rest.slice(0, reads.length), inl = rest.slice(reads.length);
-    const eml = b64ToBytes(emlB64);
+    let eml;
+    if (snap.compose) {
+      const built = await buildDraftEml(snap, bodyHtml, bodyText, readAtt);
+      eml = built.bytes;
+      if (built.skipped) problems.push(`${built.skipped} attachment${built.skipped === 1 ? "" : "s"} could not be included in the rebuilt email file (cloud links)`);
+    } else eml = b64ToBytes(emlB64);
 
     // Check, right now, whether this email is already in the job (e.g. a colleague saved it first).
     const id = await idPromise;
@@ -625,6 +682,7 @@ $("send").addEventListener("click", async () => {
 
     // Remember which job this conversation was filed to (kept on this computer only).
     saveConvRecord(convId, jobAtSend);
+    await markSaved(snap);
 
     let msg;
     if (duplicate) {
@@ -637,6 +695,7 @@ $("send").addEventListener("click", async () => {
     }
     if (atts.length) msg += ` ${savedAtts} of ${atts.length} attachment${atts.length === 1 ? "" : "s"} in ${attFolderLabel}.`;
     if (problems.length) msg += ` Problems: ${problems.join("; ")}.`;
+    if (snap.compose) msg += " You can now send the email.";
     setStatus(msg, problems.length ? "err" : "ok");
   } catch (e) {
     setStatus(e.message, "err");
@@ -646,20 +705,30 @@ $("send").addEventListener("click", async () => {
   }
 });
 
-// Called when a different email is selected in the pinned panel.
-function refreshForItem(keepStatus) {
+// Called when a different email is selected in the pinned panel (or the draft is refreshed).
+let snapRun = 0;
+async function refreshForItem(keepStatus) {
+  const run = ++snapRun;
   justSaved = null;
   clearJob();
+  const snap = await loadSnapshot();
+  if (run !== snapRun) return; // another email was selected meanwhile
+  cur = snap;
   $("name").value = suggestName();
   renderAttachments();
   if (!keepStatus) setStatus("");
   refreshSend();
   smartFill();
 }
+const loadSnapshot = () => (isCompose() ? loadDraftSnapshot() : Promise.resolve(readSnapshot()));
 
 /* ---------- init ---------- */
 $("name").addEventListener("input", refreshSend);
 ["key", "base"].forEach((id) => $(id).addEventListener("change", () => store.set("wb_" + id, $(id).value.trim())));
+$("askSend").addEventListener("change", () => {
+  try { const rs = Office.context.roamingSettings; rs.set("wb_ask", $("askSend").checked); rs.saveAsync(() => {}); } catch { /* settings unavailable */ }
+});
+$("refreshDraft").addEventListener("click", () => { if (!sending) refreshForItem(false); });
 $("fmtPdf").addEventListener("change", () => store.set("wb_fmtpdf", $("fmtPdf").checked ? "1" : "0"));
 
 Office.onReady(async () => {
@@ -670,11 +739,14 @@ Office.onReady(async () => {
   $("key").value = store.get("wb_key") || "";
   $("base").value = store.get("wb_base") || DEFAULT_BASE;
   $("fmtPdf").checked = store.get("wb_fmtpdf") !== "0";
+  try { $("askSend").checked = Office.context.roamingSettings.get("wb_ask") === true; } catch { /* settings unavailable */ }
   if (!$("key").value) $("settings").open = true;
-  $("name").value = suggestName();
-  renderAttachments();
-  // Keep the pane pinned: refresh the file name when another email is selected.
-  Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { if (sending) { pendingRefresh = true; return; } refreshForItem(false); });
-  refreshSend();
-  smartFill();
+  if (isCompose()) { // writing an email: save the draft rather than a received email
+    $("draftNote").hidden = false; $("refreshDraft").hidden = false;
+    $("send").textContent = "Save to Wunderbuild";
+  } else {
+    // Keep the pane pinned: refresh when another email is selected.
+    Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { if (sending) { pendingRefresh = true; return; } refreshForItem(false); });
+  }
+  await refreshForItem(false);
 });
