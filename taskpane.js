@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.23"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.24"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -601,6 +601,15 @@ async function buildDraftEml(snap, bodyHtml, bodyText, readAtt) {
   return { bytes: buildEml({ id: snap.wbId, from: snap.from, to: snap.to, cc: snap.cc, bcc: snap.bcc, subject: snap.subject,
     date: new Date(), bodyHtml, bodyText, attachments: parts }), skipped };
 }
+// Sends the draft that was just saved. Only available in newer Outlook (Mailbox 1.15 and later).
+function sendDraft() {
+  return new Promise((resolve, reject) => {
+    const it = Office.context.mailbox.item;
+    if (!it || typeof it.sendAsync !== "function") return reject(new Error("unsupported"));
+    try { it.sendAsync((r) => (r.status === Office.AsyncResultStatus.Succeeded ? resolve() : reject(new Error((r.error && r.error.message) || "Outlook could not send")))); }
+    catch (e) { reject(e); }
+  });
+}
 function markSaved(snap) { // lets the send-time prompt know this draft has been saved
   return new Promise((resolve) => {
     if (!snap.compose || !snap.props) return resolve();
@@ -695,7 +704,18 @@ $("send").addEventListener("click", async () => {
     }
     if (atts.length) msg += ` ${savedAtts} of ${atts.length} attachment${atts.length === 1 ? "" : "s"} in ${attFolderLabel}.`;
     if (problems.length) msg += ` Problems: ${problems.join("; ")}.`;
-    if (snap.compose) msg += " You can now send the email.";
+    const wantSend = snap.compose; // a draft is always sent as it is saved, so the saved copy matches what went out
+    if (wantSend && problems.length) {
+      msg += " The email has NOT been sent because of the problems above. Fix them, or send it yourself.";
+    } else if (wantSend) {
+      setStatus(msg + " Sending…", "busy");
+      try { await sendDraft(); msg += " Email sent."; }
+      catch (e) {
+        msg += e.message === "unsupported" ? " This version of Outlook cannot send from the add-in, so click Send yourself."
+          : ` The email could not be sent automatically (${e.message}). Click Send yourself.`;
+        problems.push("not sent");
+      }
+    }
     setStatus(msg, problems.length ? "err" : "ok");
   } catch (e) {
     setStatus(e.message, "err");
@@ -743,7 +763,7 @@ Office.onReady(async () => {
   if (!$("key").value) $("settings").open = true;
   if (isCompose()) { // writing an email: save the draft rather than a received email
     $("draftNote").hidden = false; $("refreshDraft").hidden = false;
-    $("send").textContent = "Save to Wunderbuild";
+    $("send").textContent = "Save and send";
   } else {
     // Keep the pane pinned: refresh when another email is selected.
     Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { if (sending) { pendingRefresh = true; return; } refreshForItem(false); });
