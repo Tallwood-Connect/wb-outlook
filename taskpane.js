@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.41"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.42"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -344,7 +344,7 @@ async function createCorrespondence(forJob) {
   if (!f) throw new Error("The Correspondence folder could not be created.");
   const sel = $("folder"), o = new Option(f.name, f._id);
   sel.add(o); sel.value = f._id;
-  corrMissing = false; $("corrNote").hidden = true;
+  corrMissing = false; $("corrNote").hidden = true; treeCache = null;
 }
 async function loadFolders() {
   const run = ++folderRun;
@@ -354,15 +354,12 @@ async function loadFolders() {
   sel.add(new Option("Loading folders…", ""));
   setStatus("Loading folders…", "busy");
   $("corrNote").hidden = true;
-  let root = null, failed = null;
-  try { root = await api(`/documents/job/${job._id}/folders`); } catch (e) { failed = e; }
+  let tree = null, failed = null;
+  try { tree = await folderTree(job._id); } catch (e) { failed = e; } // every folder, however deep (Archive folders left out)
   if (run !== folderRun) return; // another job was picked meanwhile
   sel.innerHTML = "";
   sel.add(new Option("Job documents (top level)", ""));
-  const walk = (folders, prefix) => {
-    for (const f of folders || []) { sel.add(new Option(prefix + f.name, f._id)); walk(f.subFolders, prefix + f.name + " / "); }
-  };
-  if (root) walk(root.subFolders, "");
+  for (const f of tree || []) if (f.id) sel.add(new Option(f.path, f.id));
   // Emails default to Correspondence (also matched when nested, e.g. "Admin / Correspondence").
   const corr = [...sel.options].find((o) => /(^|\/ )correspondence$/i.test(o.text.trim()));
   if (corr) sel.value = corr.value;
@@ -513,7 +510,7 @@ function jobFileIndex(jobId) {
   p.catch(() => { if (indexCache && indexCache.promise === p) indexCache = null; });
   return p;
 }
-function resetPicker() { $("wbPick").hidden = true; $("pickQ").value = ""; $("pickList").textContent = ""; pickDocs = []; pickRun++; indexCache = null; treeCache = null; setPickStatus(""); }
+function resetPicker() { $("wbPick").hidden = true; $("pickQ").value = ""; $("pickList").textContent = ""; pickDocs = []; pickRun++; indexCache = null; setPickStatus(""); }
 
 function renderPickRows(items) { // items: [{ d, sub }]
   const list = $("pickList");
@@ -848,6 +845,7 @@ async function ensureOutlookFolder(parentId) {
     method: "POST",
     body: JSON.stringify({ name: "Outlook Files", ...(parentId ? { parentId } : {}) }),
   });
+  treeCache = null; // the folder list has changed
   return created._id;
 }
 
