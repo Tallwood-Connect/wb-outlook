@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.35"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.36"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -418,10 +418,28 @@ function bytesToB64(bytes) {
 }
 const escHtml = (t) => String(t == null ? "" : t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
+// Matches each cid: reference in the email to an inline image. Outlook does not give a draft's images their
+// content IDs, so images are matched by name first (the id is usually "name.png@code"), then in order of appearance
+// (several pasted images are all called "image.png").
+function buildCidMap(html, inl) {
+  const items = (inl || []).filter((r) => r && r.f), map = new Map(), used = new Set();
+  const uri = (r) => `data:${r.f.type};base64,${bytesToB64(r.f.bytes)}`;
+  const ids = [...new Set([...String(html || "").matchAll(/cid:([^"'\s)>]+)/gi)].map((m) => m[1].toLowerCase()))];
+  const left = [];
+  for (const id of ids) {
+    const base = id.split("@")[0];
+    const r = items.find((x) => !used.has(x) && (x.a.name || "").toLowerCase() === base);
+    if (r) { used.add(r); map.set(id, uri(r)); } else left.push(id);
+  }
+  for (const id of left) { const r = items.find((x) => !used.has(x)); if (r) { used.add(r); map.set(id, uri(r)); } }
+  for (const r of items) { const k = (r.a.name || "").toLowerCase(); if (k && !map.has(k)) map.set(k, uri(r)); }
+  return map;
+}
+
 // Email header block + the email's own HTML. Scripts are removed, and inline (cid:) images are embedded.
 function buildEmailHtml({ subject, meta, bodyHtml, cid }) {
   let body = String(bodyHtml || "").replace(/<script[\s\S]*?<\/script>/gi, "");
-  body = body.replace(/cid:([^"'\s)>]+)/gi, (m, id) => (cid && cid.get(id.split("@")[0].toLowerCase())) || m);
+  body = body.replace(/cid:([^"'\s)>]+)/gi, (m, id) => (cid && (cid.get(id.toLowerCase()) || cid.get(id.split("@")[0].toLowerCase()))) || m);
   const rows = meta.filter(([, v]) => v).map(([k, v]) =>
     `<tr><td style="padding:1px 10px 1px 0;font-weight:bold;vertical-align:top;white-space:nowrap">${escHtml(k)}</td><td style="padding:1px 0">${escHtml(v)}</td></tr>`).join("");
   return `<!doctype html><html><head><meta charset="utf-8">` +
@@ -525,7 +543,7 @@ function renderAttachments() {
     cb.type = "checkbox";
     cb.setAttribute("aria-label", `Save ${a.name}`);
     // Tick everything except tiny images (usually signature logos).
-    cb.checked = !((a.contentType || "").startsWith("image/") && (a.size || 0) < 20480);
+    cb.checked = !(attType(a).startsWith("image/") && (a.size || 0) < 20480);
     const nm = document.createElement("input");
     nm.type = "text"; nm.value = a.name || "attachment"; nm.spellcheck = false;
     nm.setAttribute("aria-label", `File name for ${a.name}`);
@@ -549,12 +567,19 @@ function finalName(typed, original) {
   if (ext && !/\.[A-Za-z][A-Za-z0-9]{0,9}$/.test(n)) n += ext;
   return n;
 }
+// Emails being written do not report an attachment's type, so it is worked out from the file extension.
+const EXT_TYPES = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", jpe: "image/jpeg", gif: "image/gif", bmp: "image/bmp", webp: "image/webp", svg: "image/svg+xml", tif: "image/tiff", tiff: "image/tiff", pdf: "application/pdf" };
+function attType(a) {
+  if (a.contentType) return a.contentType;
+  const m = /\.([a-z0-9]+)$/i.exec(a.name || "");
+  return (m && EXT_TYPES[m[1].toLowerCase()]) || "application/octet-stream";
+}
 function getAttachment(a) {
   return new Promise((resolve, reject) => {
     Office.context.mailbox.item.getAttachmentContentAsync(a.id, (r) => {
       if (r.status !== Office.AsyncResultStatus.Succeeded) return reject(new Error(r.error.message));
       const v = r.value, name = (a.name || "attachment").replace(/[\\/:*?"<>|]+/g, "_");
-      if (v.format === "base64") return resolve({ name, type: a.contentType || "application/octet-stream", bytes: b64ToBytes(v.content) });
+      if (v.format === "base64") return resolve({ name, type: attType(a), bytes: b64ToBytes(v.content) });
       if (v.format === "eml") return resolve({ name: /\.eml$/i.test(name) ? name : name + ".eml", type: "message/rfc822", bytes: new TextEncoder().encode(v.content) });
       if (v.format === "iCalendar") return resolve({ name: /\.ics$/i.test(name) ? name : name + ".ics", type: "text/calendar", bytes: new TextEncoder().encode(v.content) });
       reject(new Error("it is a cloud link rather than a file"));
@@ -680,7 +705,7 @@ $("send").addEventListener("click", async () => {
     const memo = new Map();
     const readAtt = (a) => { if (!memo.has(a.id)) memo.set(a.id, getAttachment(a).then((f) => ({ f }), (e) => ({ e }))); return memo.get(a.id); };
     const reads = atts.map(({ att, typed }) => readAtt(att).then((r) => ({ att, typed, f: r.f, e: r.e })));
-    const inlineAtts = snap.attachments.filter((a) => a.isInline && (a.contentType || "").startsWith("image/") && (a.size || 0) < 5 * 1024 * 1024);
+    const inlineAtts = snap.attachments.filter((a) => a.isInline && attType(a).startsWith("image/") && (a.size || 0) < 5 * 1024 * 1024);
     const inlineReads = useFmt ? inlineAtts.map((a) => readAtt(a).then((r) => (r.f ? { a, f: r.f } : null))) : [];
     const [bodyText, bodyHtml, emlB64, ...rest] = await Promise.all([getBodyText(), (useFmt || snap.compose) ? getBodyHtml() : Promise.resolve(""), snap.compose ? null : getEml(), ...reads, ...inlineReads]);
     const got = rest.slice(0, reads.length), inl = rest.slice(reads.length);
@@ -703,8 +728,7 @@ $("send").addEventListener("click", async () => {
     if (useFmt && !duplicate) {
       try {
         setStatus("Rendering formatted PDF…", "busy");
-        const cid = new Map();
-        for (const r of inl) if (r && r.f) cid.set((r.a.name || "").toLowerCase(), `data:${r.f.type};base64,${bytesToB64(r.f.bytes)}`);
+        const cid = buildCidMap(bodyHtml, inl);
         pdf = await renderPdf(buildEmailHtml({ subject, meta, bodyHtml, cid }));
       } catch (e) { problems.push(`formatted PDF unavailable (${e.message}), so a basic text PDF was saved instead`); }
     }
