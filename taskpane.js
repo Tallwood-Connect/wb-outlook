@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.26"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.27"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -307,8 +307,8 @@ async function chooseJob(j) {
   $("q").value = "";
   $("chosen").textContent = `Job: ${j.jobNumber ? "#" + j.jobNumber + " " : ""}${j.name}`;
   refreshSend();
-  if (subjectPrefixOn()) applySubjectPrefix();
   await loadFolders();
+  if (subjectPrefixOn()) await applySubjectPrefix(); // after the folders, so a problem message is not wiped by them
 }
 
 /* ---------- folders ---------- */
