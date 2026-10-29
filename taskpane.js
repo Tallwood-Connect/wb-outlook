@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.39"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.40"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -450,6 +450,8 @@ function updatePickGo() { $("pickGo").disabled = sending || ![...$("pickList").q
 
 // Every folder of the job, however deeply nested, as a flat list of { id, path }. The folder list Wunderbuild
 // returns only goes a couple of levels down, so folders without sub-folders listed are asked about one by one.
+// Folders with names like Archive, Archived or Superseded are left out, so old versions are not attached by mistake.
+const isArchiveName = (n) => /archiv|supersed|supercede|obsolete/i.test(String(n || ""));
 let treeCache = null; // { jobId, promise }
 function folderTree(jobId) {
   if (treeCache && treeCache.jobId === jobId) return treeCache.promise;
@@ -457,6 +459,7 @@ function folderTree(jobId) {
     const root = await api(`/documents/job/${jobId}/folders`);
     let calls = 0;
     const expand = async (f, depth) => {
+      if (isArchiveName(f.name)) return; // no need to look inside
       let subs = f.subFolders || [];
       if (!subs.length && depth < 8 && calls < 300) {
         calls++;
@@ -467,7 +470,7 @@ function folderTree(jobId) {
     };
     await Promise.all((root.subFolders || []).map((f) => expand(f, 1)));
     const out = [{ id: "", path: "Job documents (top level)" }];
-    const walk = (fs, prefix) => { for (const f of fs || []) { out.push({ id: f._id, path: prefix + f.name }); walk(f.subFolders, prefix + f.name + " / "); } };
+    const walk = (fs, prefix) => { for (const f of fs || []) { if (isArchiveName(f.name)) continue; out.push({ id: f._id, path: prefix + f.name }); walk(f.subFolders, prefix + f.name + " / "); } };
     walk(root.subFolders, "");
     return out;
   })();
@@ -819,7 +822,7 @@ $("signOut").addEventListener("click", () => {
 
 let sending = false, pendingRefresh = false;
 function lockUI(on) {
-  $("q").disabled = on; $("name").disabled = on; $("wbAttachBtn").disabled = on || !job; $("pickGo").disabled = on;
+  $("q").disabled = on; $("name").disabled = on; $("wbAttachBtn").disabled = on || !job; $("wbClearBtn").disabled = on; $("pickGo").disabled = on;
   $("folder").disabled = on || !job; $("attFolder").disabled = on || !job;
   for (const el of $("attList").querySelectorAll("input")) el.disabled = on;
   for (const el of $("jobs").querySelectorAll("button")) el.disabled = on;
@@ -963,11 +966,13 @@ $("send").addEventListener("click", async () => {
 // Called when a different email is selected in the pinned panel (or the draft is refreshed).
 // Reset also empties the email's attachments (pictures pasted into the body are not attachments and stay).
 async function removeAllAttachments() {
+  let n = 0;
   try {
     const it = Office.context.mailbox.item;
     const atts = await asyncVal((cb) => it.getAttachmentsAsync(cb));
-    for (const a of atts || []) if (!a.isInline) await new Promise((resolve) => it.removeAttachmentAsync(a.id, () => resolve()));
+    for (const a of atts || []) if (!a.isInline) { await new Promise((resolve) => it.removeAttachmentAsync(a.id, (r) => { if (r && r.status === Office.AsyncResultStatus.Succeeded) n++; resolve(); })); }
   } catch { /* nothing to remove, or Outlook refused */ }
+  return n;
 }
 
 let snapRun = 0;
@@ -1025,6 +1030,18 @@ $("subjPrefix").addEventListener("change", () => {
   syncSwitch();
   store.set("wb_subjprefix", $("subjPrefix").checked ? "1" : "0");
   applySubjectPrefix(!$("subjPrefix").checked); // switching it off takes the added text back out
+});
+$("wbClearBtn").addEventListener("click", async () => {
+  if (sending) return;
+  sending = true; lockUI(true);
+  try {
+    const n = await removeAllAttachments();
+    setStatus(n ? `Removed ${n} attachment${n === 1 ? "" : "s"} from the email.` : "There were no attachments to remove.", n ? "ok" : "");
+    if (!$("wbPick").hidden) { $("pickQ").value.trim() ? runPickSearch() : loadPickList(); } // lets the files be attached again
+  } finally {
+    sending = false; lockUI(false); refreshSend();
+    if (pendingRefresh) { pendingRefresh = false; refreshForItem(true); }
+  }
 });
 $("wbAttachBtn").addEventListener("click", () => { if (!sending) openPicker(); });
 $("pickFolder").addEventListener("change", () => { if (!sending) { $("pickQ").value = ""; loadPickList(); } });
