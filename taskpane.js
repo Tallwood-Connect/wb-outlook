@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.46"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.47"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -15,6 +15,13 @@ let job = null; // { _id, name }
 function setStatus(msg, kind = "") { const s = $("status"); s.textContent = msg; s.className = kind; }
 function base() { return ($("base").value.trim() || DEFAULT_BASE).replace(/\/+$/, ""); }
 // The main button: normal, or a green tick when this email is already saved in the job.
+// Finds a folder by name in a list of options: an exact top-level match first, otherwise one nested inside another folder.
+function findNamedOption(options, name) {
+  const list = [...options], want = name.toLowerCase();
+  return list.find((o) => o.text.trim().toLowerCase() === want) || list.find((o) => new RegExp(`(^|/ )${name}$`, "i").test(o.text.trim()));
+}
+const isPdfDoc = (d) => /\.pdf$/i.test((d && d.name) || ""), isEmlDoc = (d) => /\.eml$/i.test((d && d.name) || "");
+let foldersFailed = false; // the job's folder list could not be loaded
 let dupFound = false, savedAt = null, attOpen = false; // savedAt: when the email was filed; attOpen: "Save Attachments Only" pressed
 const fmtSaved = (d) => d.toLocaleString("en-AU", { weekday: "short", day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
 // Wunderbuild documents do not report a creation time here, but their ids (MongoDB ObjectIds) start with one.
@@ -25,7 +32,7 @@ function docSavedAt(d) {
   return m ? new Date(parseInt(d._id.slice(0, 8), 16) * 1000) : null;
 }
 function refreshSend() {
-  const ready = !!(job && $("name").value.trim());
+  const ready = !!(job && $("name").value.trim()) && !foldersFailed;
   const compose = isCompose();
   const attOn = !compose && selectedAttachments().length > 0;
   const btn = $("send");
@@ -313,7 +320,7 @@ async function autoMatch() {
 
 // Forgets the selected job (and its folders) so one email's job never carries over to the next.
 function clearJob() {
-  job = null; jobAuto = false; $("subjNote").textContent = "";
+  job = null; jobAuto = false; foldersFailed = false; $("subjNote").textContent = "";
   folderRun++; searchRun++;
   $("chosen").textContent = "";
   $("matchNote").className = ""; $("matchNote").textContent = "";
@@ -368,23 +375,25 @@ async function loadFolders() {
   setStatus("Loading folders…", "busy");
   $("corrNote").hidden = true;
   let tree = null, failed = null;
+  foldersFailed = false;
   try { tree = await folderTree(job._id); } catch (e) { failed = e; } // every folder, however deep (Archive folders left out)
   if (run !== folderRun) return; // another job was picked meanwhile
   sel.innerHTML = "";
   sel.add(new Option("Job documents (top level)", ""));
   for (const f of tree || []) if (f.id) sel.add(new Option(f.path, f.id));
   // Emails default to Correspondence (also matched when nested, e.g. "Admin / Correspondence").
-  const corr = [...sel.options].find((o) => /(^|\/ )correspondence$/i.test(o.text.trim()));
+  const corr = findNamedOption(sel.options, "Correspondence");
   if (corr) sel.value = corr.value;
   corrMissing = !corr && !failed; // only claim it is missing when the folder list loaded fine
   $("corrNote").hidden = !corrMissing;
   for (const o of sel.options) af.add(new Option(o.text, o.value));
   // Attachments default to "Working Documents"; otherwise the email's folder.
-  const work = [...af.options].find((o) => /(^|\/ )working documents$/i.test(o.text.trim()));
+  const work = findNamedOption(af.options, "Working Documents");
   af.value = work ? work.value : sel.value;
   sel.disabled = false; af.disabled = false;
   fillAttRowSelects();
-  if (failed) setStatus(failed.message, "err"); else setStatus("");
+  foldersFailed = !!failed; // saving stays off: otherwise the files would land in the job's top level
+  if (failed) setStatus(`${failed.message} Pick the job again to retry.`, "err"); else setStatus("");
   refreshSend();
   if (!failed) checkDuplicate();
 }
@@ -583,7 +592,7 @@ async function openPicker() {
     if (job !== forJob) return;
     sel.innerHTML = "";
     for (const f of folders) sel.add(new Option(f.path, f.id));
-    const work = folders.find((f) => /(^|\/ )working documents$/i.test(f.path.trim()));
+    const work = folders.find((f) => f.path.trim().toLowerCase() === "working documents") || folders.find((f) => /(^|\/ )working documents$/i.test(f.path.trim()));
     sel.value = work ? work.id : "";
     sel.disabled = false;
     await loadPickList();
@@ -699,7 +708,7 @@ async function listDocs(jobId, folderId) {
 
 // Looks in the folder the email will be saved to, and in Correspondence, plus each one's "Outlook Files" folder.
 async function findExisting(forJob, destFolderId, id) {
-  const corr = [...$("folder").options].find((o) => /(^|\/ )correspondence$/i.test(o.text.trim()));
+  const corr = findNamedOption($("folder").options, "Correspondence");
   const folders = [...new Set([destFolderId, corr ? corr.value : destFolderId])];
   const lists = await Promise.all(folders.map(async (f) => {
     const [docs, outlookId] = await Promise.all([listDocs(forJob._id, f), findOutlookFolderId(f)]);
@@ -711,7 +720,7 @@ async function findExisting(forJob, destFolderId, id) {
 let dupRun = 0, justSaved = null; // justSaved = id of the job this email was just saved to
 function resetDup() { dupRun++; dupFound = false; savedAt = null; attOpen = false; $("dupNote").className = ""; $("dupNote").textContent = ""; }
 async function checkDuplicate() {
-  resetDup();
+  resetDup(); refreshSend();
   const run = dupRun, forJob = job, item = cur, note = $("dupNote");
   if (!forJob || !item || justSaved === forJob._id) return; // no "already saved" note straight after saving it
   note.className = "busy"; note.textContent = "Checking whether this email is already saved…";
@@ -719,14 +728,18 @@ async function checkDuplicate() {
     const found = await findExisting(forJob, $("folder").value, await emailId(item));
     if (run !== dupRun || job !== forJob) return; // something changed meanwhile
     note.className = ""; note.textContent = "";
+    const both = found.some(isPdfDoc) && found.some(isEmlDoc);
     if (found.length) {
-      dupFound = true; // received emails show a green "Sent to Wunderbuild" button instead of a message
-      savedAt = found.map(docSavedAt).filter(Boolean).sort((a, b) => a - b)[0] || null;
-      for (const row of $("attList").children) row.children[0].checked = false; // already filed: tick one again to save it separately
-      if (isCompose()) note.textContent = "This email was already saved to Wunderbuild. Save and send will only send it.";
-      refreshSend();
+      dupFound = both; // received emails show a green "Sent to Wunderbuild" button instead of a message
+      if (both) {
+        savedAt = found.map(docSavedAt).filter(Boolean).sort((a, b) => a - b)[0] || null;
+        for (const row of $("attList").children) row.children[0].checked = false; // already filed: tick one again to save it separately
+      }
+      if (isCompose()) note.textContent = both ? "This email was already saved to Wunderbuild. Save and send will update the saved copy, then send it." : "Part of this email was saved earlier. Save and send will save it again.";
+      else if (!both) note.textContent = "Part of this email was saved earlier. Saving will add what is missing.";
     }
   } catch (e) { if (run === dupRun) { note.className = ""; note.textContent = `Could not check for an existing copy: ${e.message}`; } }
+  if (run === dupRun) refreshSend();
 }
 
 /* ---------- attachments ---------- */
@@ -884,7 +897,7 @@ $("signOut").addEventListener("click", () => {
 
 let sending = false, pendingRefresh = false;
 function lockUI(on) {
-  $("q").disabled = on; $("name").disabled = on; $("wbAttachBtn").disabled = on || !job; $("wbClearBtn").disabled = on; $("pickGo").disabled = on;
+  $("q").disabled = on; $("name").disabled = on; $("wbAttachBtn").disabled = on || !job; $("wbClearBtn").disabled = on; $("subjPrefix").disabled = on; $("attMode").disabled = on; $("pickGo").disabled = on;
   $("folder").disabled = on || !job; $("attFolder").disabled = on || !job;
   for (const el of $("attList").querySelectorAll("input,select")) el.disabled = on;
   for (const el of $("jobs").querySelectorAll("button")) el.disabled = on;
@@ -919,8 +932,10 @@ function markSaved(snap) { // lets the send-time prompt know this draft has been
 
 $("folder").addEventListener("change", () => { if (job && !sending) checkDuplicate(); });
 
+let lastResult = null; // the outcome of the latest save
 $("send").addEventListener("click", async () => {
   if (sending) return;
+  lastResult = null;
   sending = true; lockUI(true); $("send").disabled = true;
   try {
     const baseName = $("name").value.trim().replace(/\.(eml|pdf|msg)$/i, "");
@@ -957,27 +972,40 @@ $("send").addEventListener("click", async () => {
     let existing = [];
     try { setStatus("Checking for an existing copy…", "busy"); existing = await findExisting(jobAtSend, folderId, id); }
     catch (e) { problems.push(`could not check for an existing copy (${e.message})`); }
-    const duplicate = existing.length > 0;
+    const oldPdf = existing.filter(isPdfDoc), oldEml = existing.filter(isEmlDoc);
+    const replace = snap.compose; // a draft is saved afresh each time, so the saved copy always matches what is sent
+    const needPdf = replace || !oldPdf.length, needEml = replace || !oldEml.length; // a received email only fills in what is missing
+    const duplicate = !needPdf && !needEml;
     const fileBase = `${baseName} [${id}]`;
 
     let pdf = null;
-    if (useFmt && !duplicate) {
+    if (useFmt && needPdf) {
       try {
         setStatus("Rendering formatted PDF…", "busy");
         const cid = buildCidMap(bodyHtml, inl);
         pdf = await renderPdf(buildEmailHtml({ subject, meta, bodyHtml, cid }));
       } catch (e) { problems.push(`formatted PDF unavailable (${e.message}), so a basic text PDF was saved instead`); }
     }
-    if (!duplicate) {
+    let newPdfOk = false, newEmlOk = false;
+    if (needPdf) {
       if (!pdf) pdf = emailToPdf({ subject, meta, body: bodyText });
       setStatus("Saving PDF…", "busy");
       await uploadFile(`${fileBase}.pdf`, "application/pdf", pdf, folderId);
-
+      newPdfOk = true;
+    }
+    if (needEml) {
       try {
         setStatus("Saving original email to Outlook Files…", "busy");
         const outlookFolderId = await ensureOutlookFolder(folderId);
         await uploadFile(`${fileBase}.eml`, "message/rfc822", eml, outlookFolderId);
+        newEmlOk = true;
       } catch (e) { problems.push(`original email not saved (${e.message})`); }
+    }
+    if (replace) { // the new copies are in, so the earlier copies of this draft can go
+      try {
+        for (const d of newPdfOk ? oldPdf : []) await api(`/documents/job/${jobAtSend._id}/${d._id}`, { method: "DELETE" });
+        for (const d of newEmlOk ? oldEml : []) await api(`/documents/job/${jobAtSend._id}/${d._id}`, { method: "DELETE" });
+      } catch (e) { problems.push(`the earlier saved copy could not be removed (${e.message})`); }
     }
 
     let savedAtts = 0, n = 0;
@@ -1000,8 +1028,10 @@ $("send").addEventListener("click", async () => {
       if (!atts.length) msg += " Nothing new to save.";
     } else {
       justSaved = jobAtSend._id;
-      msg = `Saved. PDF in ${folderLabel}.`;
-      if (!problems.some((p) => p.startsWith("original"))) msg += ` Original email in ${folderLabel} / Outlook Files.`;
+      if (needPdf) {
+        msg = `${replace && oldPdf.length ? "Saved copy updated" : "Saved"}. PDF in ${folderLabel}.`;
+        if (newEmlOk) msg += ` Original email in ${folderLabel} / Outlook Files.`;
+      } else msg = `The PDF was already saved.${newEmlOk ? ` Added the missing original email in ${folderLabel} / Outlook Files.` : ""}`;
     }
     if (atts.length) msg += ` ${savedAtts} of ${atts.length} attachment${atts.length === 1 ? "" : "s"} in ${perFile ? "the chosen folders" : attFolderLabel}.`;
     if (problems.length) msg += ` Problems: ${problems.join("; ")}.`;
@@ -1018,12 +1048,18 @@ $("send").addEventListener("click", async () => {
         problems.push("not sent");
       }
     }
-    setStatus(msg, problems.length ? "err" : "ok");
+    lastResult = { msg, kind: problems.length ? "err" : "ok", subject: snap.subject };
+    setStatus(msg, lastResult.kind);
   } catch (e) {
+    lastResult = { msg: e.message, kind: "err", subject: "" };
     setStatus(e.message, "err");
   } finally {
     sending = false; lockUI(false); refreshSend();
-    if (pendingRefresh) { pendingRefresh = false; refreshForItem(true); }
+    if (pendingRefresh) { // another email was selected during the save: refresh, then bring the result back (it would otherwise be wiped)
+      pendingRefresh = false;
+      const keep = lastResult;
+      refreshForItem(true).then(() => { if (keep && !sending) setStatus(keep.subject ? `Earlier email (${keep.subject.slice(0, 40)}): ${keep.msg}` : keep.msg, keep.kind); });
+    }
   }
 });
 
@@ -1055,6 +1091,8 @@ function startSubjectWatch() {
       if (subject == null || sending || subject.trimEnd() === cur.subject.trimEnd()) return;
       cur.subject = subject;
       if (!nameEdited) { $("name").value = suggestName(); refreshSend(); }
+      // Auto subject: put the job details back if they were deleted or damaged by hand
+      if (subjectPrefixOn() && job && !jobAuto && !subject.startsWith(buildPrefix(job))) { await applySubjectPrefix(); return; }
       // the subject changed: suggest jobs again, unless a job was picked by hand
       if (!job || jobAuto) { if (job) clearJob(); autoMatch(); }
     } catch { /* draft closed or Outlook busy: try again next time */ }
@@ -1072,7 +1110,7 @@ async function refreshForItem(keepStatus) {
   renderAttachments();
   if (!keepStatus) setStatus("");
   refreshSend();
-  smartFill();
+  await smartFill();
 }
 const loadSnapshot = () => (isCompose() ? loadDraftSnapshot() : Promise.resolve(readSnapshot()));
 
