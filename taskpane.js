@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.43"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.44"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -15,7 +15,15 @@ let job = null; // { _id, name }
 function setStatus(msg, kind = "") { const s = $("status"); s.textContent = msg; s.className = kind; }
 function base() { return ($("base").value.trim() || DEFAULT_BASE).replace(/\/+$/, ""); }
 // The main button: normal, or a green tick when this email is already saved in the job.
-let dupFound = false;
+let dupFound = false, savedAt = null, attOpen = false; // savedAt: when the email was filed; attOpen: "Save Attachments Only" pressed
+const fmtSaved = (d) => d.toLocaleString("en-AU", { weekday: "short", day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
+// Wunderbuild documents do not report a creation time here, but their ids (MongoDB ObjectIds) start with one.
+function docSavedAt(d) {
+  const t = d.createdAt || d.dateCreated || d.uploadedAt;
+  if (t && !isNaN(new Date(t))) return new Date(t);
+  const m = /^[0-9a-f]{24}$/i.exec(d._id || "");
+  return m ? new Date(parseInt(d._id.slice(0, 8), 16) * 1000) : null;
+}
 function refreshSend() {
   const ready = !!(job && $("name").value.trim());
   const compose = isCompose();
@@ -29,6 +37,11 @@ function refreshSend() {
   }
   $("wbAttachBtn").disabled = !job || sending;
   if (!job) $("wbPick").hidden = true;
+  // Already filed: hide the saving settings; "Save Attachments Only" brings back the attachment ones.
+  const filed = dupFound && !compose;
+  $("main").className = filed ? (attOpen ? "filed attopen" : "filed") : "";
+  $("savedNote").textContent = filed ? (savedAt ? `Saved to Wunderbuild on ${fmtSaved(savedAt)}` : "Already saved to Wunderbuild") : "";
+  $("attOnlyBtn").hidden = !(filed && !attOpen && currentAtts.length > 0);
 }
 
 async function api(path, opts = {}) {
@@ -696,7 +709,7 @@ async function findExisting(forJob, destFolderId, id) {
 }
 
 let dupRun = 0, justSaved = null; // justSaved = id of the job this email was just saved to
-function resetDup() { dupRun++; dupFound = false; $("dupNote").className = ""; $("dupNote").textContent = ""; }
+function resetDup() { dupRun++; dupFound = false; savedAt = null; attOpen = false; $("dupNote").className = ""; $("dupNote").textContent = ""; }
 async function checkDuplicate() {
   resetDup();
   const run = dupRun, forJob = job, item = cur, note = $("dupNote");
@@ -708,6 +721,7 @@ async function checkDuplicate() {
     note.className = ""; note.textContent = "";
     if (found.length) {
       dupFound = true; // received emails show a green "Sent to Wunderbuild" button instead of a message
+      savedAt = found.map(docSavedAt).filter(Boolean).sort((a, b) => a - b)[0] || null;
       for (const row of $("attList").children) row.children[0].checked = false; // already filed: tick one again to save it separately
       if (isCompose()) note.textContent = "This email was already saved to Wunderbuild. Save and send will only send it.";
       refreshSend();
@@ -731,7 +745,7 @@ function renderAttachments() {
     cb.type = "checkbox";
     cb.setAttribute("aria-label", `Save ${a.name}`);
     // Tick everything except tiny images (usually signature logos).
-    cb.checked = !(attType(a).startsWith("image/") && (a.size || 0) < 20480);
+    cb.checked = cb.dataset.def = !(attType(a).startsWith("image/") && (a.size || 0) < 20480);
     const nm = document.createElement("input");
     // The file extension is shown (in green) at the right of the box and kept as it is, so only the name is edited.
     const full = a.name || "attachment";
@@ -991,7 +1005,7 @@ $("send").addEventListener("click", async () => {
     }
     if (atts.length) msg += ` ${savedAtts} of ${atts.length} attachment${atts.length === 1 ? "" : "s"} in ${perFile ? "the chosen folders" : attFolderLabel}.`;
     if (problems.length) msg += ` Problems: ${problems.join("; ")}.`;
-    if (!snap.compose && !problems.length) dupFound = true; // everything saved: the button turns into the green "Sent to Wunderbuild"
+    if (!snap.compose && !problems.length) { dupFound = true; if (!savedAt) savedAt = new Date(); } // everything saved: the button turns into the green "Sent to Wunderbuild"
     const wantSend = snap.compose; // a draft is always sent as it is saved, so the saved copy matches what went out
     if (wantSend && problems.length) {
       msg += " The email has NOT been sent because of the problems above. Fix them, or send it yourself.";
@@ -1087,6 +1101,11 @@ $("attMode").addEventListener("change", () => {
     const sel = row.children[3];
     if (sel && !sel.dataset.touched) sel.value = $("attFolder").value;
   }
+});
+$("attOnlyBtn").addEventListener("click", () => {
+  attOpen = true;
+  for (const row of $("attList").children) row.children[0].checked = String(row.children[0].dataset.def) !== "false"; // back to the usual ticks
+  refreshSend();
 });
 $("wbClearBtn").addEventListener("click", async () => {
   if (sending) return;
