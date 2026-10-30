@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.50"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.51"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -52,20 +52,35 @@ function refreshSend() {
   $("attOnlyBtn").hidden = !(filed && !attOpen && currentAtts.length > 0);
 }
 
+// Wunderbuild limits how fast requests can be made, so at most 4 run at once, and a "429 Too Many Requests" reply
+// is retried after a short wait (nothing has been done by the server when it says that, so retrying is safe).
+let apiActive = 0; const apiQueue = [];
+const apiSlot = () => new Promise((go) => { if (apiActive < 4) { apiActive++; go(); } else apiQueue.push(go); });
+const apiFree = () => { const next = apiQueue.shift(); if (next) next(); else apiActive--; };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const plainError = (t) => String(t || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
 async function api(path, opts = {}) {
   const key = $("key").value.trim();
   if (!key) { $("settings").open = true; throw new Error("Add your Wunderbuild API key under API settings."); }
-  let res;
-  try {
-    res = await fetch(base() + path, {
-      ...opts,
-      headers: { "x-api-key": key, "Content-Type": "application/json", ...(opts.headers || {}) },
-    });
-  } catch (err) {
-    throw new Error(`Request to ${base()}${path.split("?")[0]} was blocked or failed (${err && err.message}). Check the API base URL and the proxy settings.`);
+  for (let attempt = 0; ; attempt++) {
+    let res;
+    await apiSlot();
+    try {
+      res = await fetch(base() + path, {
+        ...opts,
+        headers: { "x-api-key": key, "Content-Type": "application/json", ...(opts.headers || {}) },
+      });
+    } catch (err) {
+      throw new Error(`Request to ${base()}${path.split("?")[0]} was blocked or failed (${err && err.message}). Check the API base URL and the proxy settings.`);
+    } finally { apiFree(); }
+    if (res.status === 429 && attempt < 5) {
+      const ra = Number(res.headers && res.headers.get && res.headers.get("retry-after"));
+      await sleep(Math.min(10000, (ra > 0 ? ra * 1000 : 1000 * 2 ** attempt) + Math.random() * 400));
+      continue;
+    }
+    if (!res.ok) throw new Error(res.status === 429 ? "Wunderbuild is busy (too many requests). Wait a few seconds and try again." : `Wunderbuild returned ${res.status}: ${plainError(await res.text())}`);
+    return res.status === 204 ? null : res.json();
   }
-  if (!res.ok) throw new Error(`Wunderbuild returned ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  return res.status === 204 ? null : res.json();
 }
 
 /* ---------- conversation record ---------- */
