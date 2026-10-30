@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.49"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.50"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -429,7 +429,8 @@ function suggestName() {
   if (!item) return "";
   const d = item.date;
   const day = d.toISOString().slice(0, 10);
-  const subject = (stripPrefix(item.subject) || "No subject").replace(/[\\/:*?"<>|\r\n]+/g, " ").trim().slice(0, 100);
+  const noReply = (t) => t.replace(/^\s*((re|fw|fwd|aw|sv|vs)\s*:\s*)+/i, ""); // "RE:", "FW:" etc. do not belong in a file name
+  const subject = (noReply(stripPrefix(noReply(item.subject || ""))).replace(/\s+/g, " ").trim() || "No subject").replace(/[\\/:*?"<>|\r\n]+/g, " ").trim().slice(0, 100);
   return `${day} - ${subject}`;
 }
 
@@ -653,11 +654,15 @@ async function attachPicked() {
 function buildEmailHtml({ subject, meta, bodyHtml, cid }) {
   let body = String(bodyHtml || "").replace(/<script[\s\S]*?<\/script>/gi, "");
   body = body.replace(/cid:([^"'\s)>]+)/gi, (m, id) => (cid && (cid.get(id.toLowerCase()) || cid.get(id.split("@")[0].toLowerCase()))) || m);
+  // Pictures that could not be found would leave an empty gap or a broken icon, so they are replaced by a short note.
+  body = body.replace(/<img\b[^>]*\bsrc\s*=\s*["']?cid:[^>]*>/gi, '<span style="color:#888;font-size:11px">[picture not included]</span>');
+  // Runs of empty lines and paragraphs make big blank spaces: keep one.
+  body = body.replace(/(<br\s*\/?>\s*){3,}/gi, "<br><br>").replace(/(<p\b[^>]*>(?:\s|&nbsp;|<br\s*\/?>|<o:p>\s*<\/o:p>)*<\/p>\s*){2,}/gi, "<p>&nbsp;</p>");
   const rows = meta.filter(([, v]) => v).map(([k, v]) =>
     `<tr><td style="padding:1px 10px 1px 0;font-weight:bold;vertical-align:top;white-space:nowrap">${escHtml(k)}</td><td style="padding:1px 0">${escHtml(v)}</td></tr>`).join("");
   return `<!doctype html><html><head><meta charset="utf-8">` +
     `<meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none'">` +
-    `<style>img{max-width:100%!important;height:auto!important}</style></head><body style="margin:0">` + // keeps pictures in proportion
+    `<style>img{max-width:100%!important;height:auto!important}*{break-inside:auto!important;page-break-inside:auto!important;min-height:0!important}div:empty,p:empty{display:none!important}</style></head><body style="margin:0">` + // keeps pictures in proportion
     `<div style="font:13px Arial,Helvetica,sans-serif;color:#000;border-bottom:1px solid #999;padding-bottom:10px;margin-bottom:14px">` +
     `<div style="font-size:18px;font-weight:bold;margin-bottom:8px">${escHtml(subject || "(No subject)")}</div><table style="border-collapse:collapse">${rows}</table></div>` +
     `<div>${body}</div></body></html>`;
@@ -971,9 +976,12 @@ $("send").addEventListener("click", async () => {
     const readAtt = (a) => { if (!memo.has(a.id)) memo.set(a.id, getAttachment(a).then((f) => ({ f }), (e) => ({ e }))); return memo.get(a.id); };
     const perFile = $("attMode").checked; // a folder chosen for each attachment, or one folder for all
     const reads = atts.map(({ att, typed, cb, folder }) => readAtt(att).then((r) => ({ att, typed, cb, folder, f: r.f, e: r.e })));
-    const inlineAtts = snap.attachments.filter((a) => a.isInline && attType(a).startsWith("image/") && (a.size || 0) < 5 * 1024 * 1024);
+    const htmlNow = (useFmt || snap.compose) ? await getBodyHtml() : "";
+    const cidNames = new Set([...htmlNow.matchAll(/cid:([^"'\s)>]+)/gi)].map((m) => m[1].toLowerCase().split("@")[0]));
+    // pictures can be listed by Outlook as ordinary attachments while the email shows them inline (common in replies)
+    const inlineAtts = snap.attachments.filter((a) => attType(a).startsWith("image/") && (a.size || 0) < 5 * 1024 * 1024 && (a.isInline || cidNames.has((a.name || "").toLowerCase())));
     const inlineReads = useFmt ? inlineAtts.map((a) => readAtt(a).then((r) => (r.f ? { a, f: r.f } : null))) : [];
-    const [bodyText, bodyHtml, emlB64, ...rest] = await Promise.all([getBodyText(), (useFmt || snap.compose) ? getBodyHtml() : Promise.resolve(""), snap.compose ? null : getEml(), ...reads, ...inlineReads]);
+    const [bodyText, bodyHtml, emlB64, ...rest] = await Promise.all([getBodyText(), htmlNow, snap.compose ? null : getEml(), ...reads, ...inlineReads]);
     const got = rest.slice(0, reads.length), inl = rest.slice(reads.length);
     let eml;
     if (snap.compose) {
