@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.47"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.48"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -40,7 +40,7 @@ function refreshSend() {
   else {
     btn.className = "";
     btn.textContent = dupFound && !compose ? "Save attachments" : compose ? "Save and send" : "Send to Wunderbuild";
-    btn.disabled = !ready;
+    btn.disabled = !ready || sending; // not while an attachment is being added or a save is running
   }
   $("wbAttachBtn").disabled = !job || sending;
   if (!job) $("wbPick").hidden = true;
@@ -689,9 +689,8 @@ function hash40(str) {
 }
 async function emailId(item) {
   // Runs straight away (no waiting), so it reads the email that is open right now.
-  return hash40((item.internetMessageId
-    ? String(item.internetMessageId).trim()
-    : item.wbId ? String(item.wbId)
+  return hash40((item.wbId ? String(item.wbId) // a reply saved while being written: same reference as the draft had
+    : item.internetMessageId ? String(item.internetMessageId).trim()
     : [fmtAddr(item.from), item.date ? item.date.toISOString() : "", item.subject || ""].join("|")
   ).toLowerCase());
 }
@@ -897,6 +896,7 @@ $("signOut").addEventListener("click", () => {
 
 let sending = false, pendingRefresh = false;
 function lockUI(on) {
+  if (on) $("send").disabled = true;
   $("q").disabled = on; $("name").disabled = on; $("wbAttachBtn").disabled = on || !job; $("wbClearBtn").disabled = on; $("subjPrefix").disabled = on; $("attMode").disabled = on; $("pickGo").disabled = on;
   $("folder").disabled = on || !job; $("attFolder").disabled = on || !job;
   for (const el of $("attList").querySelectorAll("input,select")) el.disabled = on;
@@ -947,7 +947,7 @@ $("send").addEventListener("click", async () => {
 
     // Read everything from the open email first, in one go, so clicking another email cannot mix things up.
     setStatus(isCompose() ? "Reading your draft…" : "Reading email…", "busy");
-    const snap = isCompose() ? await loadDraftSnapshot() : readSnapshot(); // a read email is captured instantly
+    const snap = isCompose() ? await loadDraftSnapshot() : Object.assign(readSnapshot(), { wbId: cur && cur.wbId ? cur.wbId : null }); // a read email is captured instantly (keeping the reference a saved reply carries)
     const subject = snap.subject, meta = emailMeta(snap);
     const convId = snap.conversationId, jobAtSend = job;
     const idPromise = emailId(snap); // identity of the email that is open right now
@@ -1019,6 +1019,7 @@ $("send").addEventListener("click", async () => {
     }
 
     // Remember which job this conversation was filed to (kept on this computer only).
+    if (snap.compose && snap.wbId) store.set(sentKey(snap.subject, snap.to), snap.wbId); // so the sent copy is recognised as saved
     saveConvRecord(convId, jobAtSend);
     await markSaved(snap);
 
@@ -1112,7 +1113,21 @@ async function refreshForItem(keepStatus) {
   refreshSend();
   await smartFill();
 }
-const loadSnapshot = () => (isCompose() ? loadDraftSnapshot() : Promise.resolve(readSnapshot()));
+// A reply that was saved while being written keeps its reference on the sent copy, so the sent copy is recognised as already saved.
+// Fallback for a sent reply whose saved reference did not travel with it: same subject and recipients as when it was saved.
+const sentKey = (subject, to) => "wb_sent_" + hash40(`${String(subject || "").trim()}|${(to || []).map((a) => String((a && a.emailAddress) || "").toLowerCase()).sort().join(",")}`.toLowerCase());
+async function loadReadSnapshot() {
+  const snap = readSnapshot();
+  const it = Office.context.mailbox.item;
+  if (snap && it && typeof it.loadCustomPropertiesAsync === "function") {
+    const props = await asyncVal((cb) => it.loadCustomPropertiesAsync(cb));
+    const wbId = props && props.get("wbId");
+    if (wbId) snap.wbId = String(wbId);
+    else { const k = store.get(sentKey(snap.subject, snap.to)); if (k) snap.wbId = k; }
+  }
+  return snap;
+}
+const loadSnapshot = () => (isCompose() ? loadDraftSnapshot() : loadReadSnapshot());
 
 /* ---------- init ---------- */
 $("name").addEventListener("input", () => { nameEdited = true; refreshSend(); });
