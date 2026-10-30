@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.51"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.52"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -22,7 +22,7 @@ function findNamedOption(options, name) {
 }
 const isPdfDoc = (d) => /\.pdf$/i.test((d && d.name) || ""), isEmlDoc = (d) => /\.eml$/i.test((d && d.name) || "");
 let repliedOnly = false; // filed because a reply to it was saved
-let foldersFailed = false; // the job's folder list could not be loaded
+let foldersFailed = false, foldersPending = false; // the job's folder list could not be loaded
 let dupFound = false, savedAt = null, attOpen = false; // savedAt: when the email was filed; attOpen: "Save Attachments Only" pressed
 const fmtSaved = (d) => d.toLocaleString("en-AU", { weekday: "short", day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
 // Wunderbuild documents do not report a creation time here, but their ids (MongoDB ObjectIds) start with one.
@@ -33,7 +33,7 @@ function docSavedAt(d) {
   return m ? new Date(parseInt(d._id.slice(0, 8), 16) * 1000) : null;
 }
 function refreshSend() {
-  const ready = !!(job && $("name").value.trim()) && !foldersFailed;
+  const ready = !!(job && $("name").value.trim()) && !foldersFailed && !foldersPending;
   const compose = isCompose();
   const attOn = !compose && selectedAttachments().length > 0;
   const btn = $("send");
@@ -345,7 +345,7 @@ async function autoMatch() {
 
 // Forgets the selected job (and its folders) so one email's job never carries over to the next.
 function clearJob() {
-  job = null; jobAuto = false; foldersFailed = false; $("subjNote").textContent = "";
+  job = null; jobAuto = false; foldersFailed = false; foldersPending = false; $("subjNote").textContent = "";
   folderRun++; searchRun++;
   $("chosen").textContent = "";
   $("matchNote").className = ""; $("matchNote").textContent = "";
@@ -389,7 +389,7 @@ async function createCorrespondence(forJob) {
   if (!f) throw new Error("The Correspondence folder could not be created.");
   const sel = $("folder"), o = new Option(f.name, f._id);
   sel.add(o); sel.value = f._id;
-  corrMissing = false; $("corrNote").hidden = true; treeCache = null;
+  corrMissing = false; $("corrNote").hidden = true; dropTree(forJob && forJob._id);
 }
 async function loadFolders() {
   const run = ++folderRun;
@@ -400,23 +400,38 @@ async function loadFolders() {
   setStatus("Loading folders…", "busy");
   $("corrNote").hidden = true;
   let tree = null, failed = null;
-  foldersFailed = false;
-  try { tree = await folderTree(job._id); } catch (e) { failed = e; } // every folder, however deep (Archive folders left out)
+  foldersFailed = false; foldersPending = false;
+  const trees = folderTrees(job._id);
+  try { tree = await trees.root; } catch (e) { failed = e; } // the quick list first, so the panel is usable straight away
   if (run !== folderRun) return; // another job was picked meanwhile
-  sel.innerHTML = "";
-  sel.add(new Option("Job documents (top level)", ""));
-  for (const f of tree || []) if (f.id) sel.add(new Option(f.path, f.id));
-  // Emails default to Correspondence (also matched when nested, e.g. "Admin / Correspondence").
-  const corr = findNamedOption(sel.options, "Correspondence");
-  if (corr) sel.value = corr.value;
-  corrMissing = !corr && !failed; // only claim it is missing when the folder list loaded fine
-  $("corrNote").hidden = !corrMissing;
-  for (const o of sel.options) af.add(new Option(o.text, o.value));
-  // Attachments default to "Working Documents"; otherwise the email's folder.
-  const work = findNamedOption(af.options, "Working Documents");
-  af.value = work ? work.value : sel.value;
+  const fill = (list, keepSel, keepAf) => {
+    sel.innerHTML = ""; af.innerHTML = "";
+    sel.add(new Option("Job documents (top level)", ""));
+    for (const f of list || []) if (f.id) sel.add(new Option(f.path, f.id));
+    // Emails default to Correspondence (also matched when nested, e.g. "Admin / Correspondence").
+    const corr = findNamedOption(sel.options, "Correspondence");
+    if (keepSel !== null && [...sel.options].some((o) => o.value === keepSel)) sel.value = keepSel; else if (corr) sel.value = corr.value;
+    for (const o of sel.options) af.add(new Option(o.text, o.value));
+    // Attachments default to "Working Documents"; otherwise the email's folder.
+    const work = findNamedOption(af.options, "Working Documents");
+    if (keepAf !== null && [...af.options].some((o) => o.value === keepAf)) af.value = keepAf; else af.value = work ? work.value : sel.value;
+    fillAttRowSelects();
+    return corr;
+  };
+  const corr = fill(tree, null, null);
+  corrMissing = false; $("corrNote").hidden = true; // "no Correspondence folder" is only claimed once the whole list is known (below)
+  foldersPending = !failed && !corr; // a nested Correspondence folder may still turn up: saving waits for the whole list
   sel.disabled = false; af.disabled = false;
-  fillAttRowSelects();
+  // The complete list (every nested folder) arrives a moment later and is swapped in without changing the choices made.
+  if (!failed) trees.promise.then((full) => {
+    if (run !== folderRun || !full) return;
+    const c = fill(full, sel.value, af.value);
+    sel.disabled = sending || !job; af.disabled = sending || !job;
+    const wasPending = foldersPending;
+    corrMissing = !c; $("corrNote").hidden = !corrMissing; foldersPending = false;
+    refreshSend();
+    if (wasPending && !sending) checkDuplicate(); // the Correspondence folder was only just found
+  }, () => { if (run === folderRun) { corrMissing = !corr; $("corrNote").hidden = !corrMissing; foldersPending = false; refreshSend(); } });
   foldersFailed = !!failed; // saving stays off: otherwise the files would land in the job's top level
   if (failed) setStatus(`${failed.message} Pick the job again to retry.`, "err"); else setStatus("");
   refreshSend();
@@ -510,32 +525,52 @@ function updatePickGo() { $("pickGo").disabled = sending || ![...$("pickList").q
 // returns only goes a couple of levels down, so folders without sub-folders listed are asked about one by one.
 // Folders with names like Archive, Archived or Superseded are left out, so old versions are not attached by mistake.
 const isArchiveName = (n) => /archiv|supersed|supercede|obsolete/i.test(String(n || ""));
-let treeCache = null; // { jobId, promise }
-function folderTree(jobId) {
-  if (treeCache && treeCache.jobId === jobId) return treeCache.promise;
-  const p = (async () => {
-    const root = await api(`/documents/job/${jobId}/folders`);
-    let calls = 0;
-    const expand = async (f, depth) => {
-      if (isArchiveName(f.name)) return; // no need to look inside
-      let subs = f.subFolders || [];
-      if (!subs.length && depth < 8 && calls < 300) {
-        calls++;
-        try { subs = (await api(`/documents/job/${jobId}/folders/${f._id}`)).subFolders || []; } catch { /* leave it as a last-level folder */ }
-      }
-      f.subFolders = subs;
-      await Promise.all(subs.map((x) => expand(x, depth + 1)));
-    };
-    await Promise.all((root.subFolders || []).map((f) => expand(f, 1)));
-    const out = [{ id: "", path: "Job documents (top level)" }];
-    const walk = (fs, prefix) => { for (const f of fs || []) { if (isArchiveName(f.name)) continue; out.push({ id: f._id, path: prefix + f.name }); walk(f.subFolders, prefix + f.name + " / "); } };
-    walk(root.subFolders, "");
-    return out;
-  })();
-  treeCache = { jobId, promise: p };
-  p.catch(() => { if (treeCache && treeCache.promise === p) treeCache = null; });
-  return p;
+let treeCache = null; // { jobId, root, promise }
+const TREE_KEY = (id) => "wb_folder_tree_" + id, TREE_MAX_AGE = 15 * 60 * 1000;
+const dropTree = (jobId) => { treeCache = null; if (jobId) store.remove(TREE_KEY(jobId)); };
+function readSavedTree(jobId) { // the full folder list from a few minutes ago, kept on this computer
+  try { const r = JSON.parse(store.get(TREE_KEY(jobId)) || "null"); if (r && Date.now() - r.at < TREE_MAX_AGE && Array.isArray(r.list)) return r.list; } catch { /* ignore */ }
+  return null;
 }
+const flattenTree = (root) => {
+  const out = [{ id: "", path: "Job documents (top level)" }];
+  const walk = (fs, prefix) => { for (const f of fs || []) { if (isArchiveName(f.name)) continue; out.push({ id: f._id, path: prefix + f.name }); walk(f.subFolders, prefix + f.name + " / "); } };
+  walk(root.subFolders, "");
+  return out;
+};
+// root = the quick list (one request, or the saved list); promise = the complete list, however deeply nested.
+function folderTrees(jobId) {
+  if (treeCache && treeCache.jobId === jobId) return treeCache;
+  const t = { jobId };
+  const saved = readSavedTree(jobId);
+  if (saved) { t.root = Promise.resolve(saved); t.promise = t.root; }
+  else {
+    let rootData = null;
+    t.root = api(`/documents/job/${jobId}/folders`).then((r) => { rootData = r; return flattenTree(r); });
+    t.promise = t.root.then(async () => {
+      let calls = 0;
+      const expand = async (f, depth) => {
+        if (isArchiveName(f.name)) return; // no need to look inside
+        let subs = f.subFolders || [];
+        if (!subs.length && depth < 8 && calls < 300) {
+          calls++;
+          try { subs = (await api(`/documents/job/${jobId}/folders/${f._id}`)).subFolders || []; } catch { /* leave it as a last-level folder */ }
+        }
+        f.subFolders = subs;
+        await Promise.all(subs.map((x) => expand(x, depth + 1)));
+      };
+      await Promise.all((rootData.subFolders || []).map((f) => expand(f, 1)));
+      const out = flattenTree(rootData);
+      store.set(TREE_KEY(jobId), JSON.stringify({ at: Date.now(), list: out }));
+      return out;
+    });
+  }
+  treeCache = t;
+  const fail = () => { if (treeCache === t) treeCache = null; };
+  t.root.catch(fail); t.promise.catch(fail);
+  return t;
+}
+const folderTree = (jobId) => folderTrees(jobId).promise;
 // Every file in the job (folders are not included), so file names can be searched. Built once per job.
 let indexCache = null, indexProgress = () => {};
 function jobFileIndex(jobId) {
@@ -911,7 +946,7 @@ async function ensureOutlookFolder(parentId) {
     method: "POST",
     body: JSON.stringify({ name: "Outlook Files", ...(parentId ? { parentId } : {}) }),
   });
-  treeCache = null; // the folder list has changed
+  dropTree(job && job._id); // the folder list has changed
   return created._id;
 }
 
