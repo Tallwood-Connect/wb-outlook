@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.52"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.53"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -172,6 +172,8 @@ async function smartFill() {
 let timer;
 $("q").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(searchJobs, 300); });
 
+// The full job number as Wunderbuild shows it, e.g. J-01053
+const fullJobNo = (j) => (j && j.jobNumber ? "J-" + String(j.jobNumber).replace(/\D/g, "").padStart(5, "0") : "");
 function renderJobList(jobs) {
   const list = $("jobs");
   list.textContent = "";
@@ -180,7 +182,7 @@ function renderJobList(jobs) {
     const li = document.createElement("li");
     const b = document.createElement("button");
     b.type = "button";
-    b.textContent = `${j.jobNumber ? "#" + j.jobNumber + " " : ""}${j.name || "Untitled job"}`;
+    b.textContent = `${fullJobNo(j) ? fullJobNo(j) + " " : ""}${j.name || "Untitled job"}`;
     if (j.address) { const s = document.createElement("small"); s.textContent = j.address; b.appendChild(s); }
     b.addEventListener("click", () => { jobAuto = false; chooseJob(j); });
     li.appendChild(b); list.appendChild(li);
@@ -191,7 +193,7 @@ function renderJobList(jobs) {
 let appliedPrefix = ""; // the text this add-in last put at the start of the subject
 function subjectPrefixOn() { return isCompose() && store.get("wb_subjprefix") === "1"; }
 function buildPrefix(j) { // e.g. "J-01067 - Smith (#12 Oak Street, PERTH)"
-  const num = j.jobNumber ? "J-" + String(j.jobNumber).replace(/\D/g, "").padStart(5, "0") : "";
+  const num = fullJobNo(j);
   const name = String(j.name || "").replace(/\s*[-–]\s*D\s*$/i, "").trim(); // drops a trailing "- D"
   let street = String(j.address || "").trim();
   if (/^\d/.test(street)) street = "#" + street; // street number gets a #; "Lot 5" and "L5" do not
@@ -372,7 +374,7 @@ async function chooseJob(j) {
   $("autoNote").textContent = "";
   $("jobs").textContent = "";
   $("q").value = "";
-  $("chosen").textContent = `Job: ${j.jobNumber ? "#" + j.jobNumber + " " : ""}${j.name}`;
+  $("chosen").textContent = `Job: ${fullJobNo(j) ? fullJobNo(j) + " " : ""}${j.name}`;
   refreshSend();
   await loadFolders();
   if (subjectPrefixOn()) await applySubjectPrefix(); // after the folders, so a problem message is not wiped by them
