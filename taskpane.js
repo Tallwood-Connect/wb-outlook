@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.48"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.49"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -21,6 +21,7 @@ function findNamedOption(options, name) {
   return list.find((o) => o.text.trim().toLowerCase() === want) || list.find((o) => new RegExp(`(^|/ )${name}$`, "i").test(o.text.trim()));
 }
 const isPdfDoc = (d) => /\.pdf$/i.test((d && d.name) || ""), isEmlDoc = (d) => /\.eml$/i.test((d && d.name) || "");
+let repliedOnly = false; // filed because a reply to it was saved
 let foldersFailed = false; // the job's folder list could not be loaded
 let dupFound = false, savedAt = null, attOpen = false; // savedAt: when the email was filed; attOpen: "Save Attachments Only" pressed
 const fmtSaved = (d) => d.toLocaleString("en-AU", { weekday: "short", day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
@@ -47,7 +48,7 @@ function refreshSend() {
   // Already filed: hide the saving settings; "Save Attachments Only" brings back the attachment ones.
   const filed = dupFound && !compose;
   $("main").className = filed ? (attOpen ? "filed attopen" : "filed") : "";
-  $("savedNote").textContent = filed ? (savedAt ? `Saved to Wunderbuild on ${fmtSaved(savedAt)}` : "Already saved to Wunderbuild") : "";
+  $("savedNote").textContent = filed ? (savedAt ? `${repliedOnly ? "Reply saved" : "Saved"} to Wunderbuild on ${fmtSaved(savedAt)}` : "Already saved to Wunderbuild") : "";
   $("attOnlyBtn").hidden = !(filed && !attOpen && currentAtts.length > 0);
 }
 
@@ -73,6 +74,15 @@ const CONV_PREFIX = "wb_conv_", CONV_MAX_AGE = 90 * 864e5, CONV_MAX_COUNT = 500;
 function saveConvRecord(convId, j) {
   if (!convId || !j) return;
   store.set(CONV_PREFIX + convId, JSON.stringify({ at: Date.now(), j: { _id: j._id, name: j.name, jobNumber: j.jobNumber } }));
+}
+// Remembers that a reply in this conversation was saved, so the email that was replied to shows as saved too.
+function saveReplyRecord(convId, j) {
+  if (convId && j) store.set(CONV_PREFIX + "reply_" + convId, JSON.stringify({ at: Date.now(), jobId: j._id }));
+}
+function getReplyRecord(convId) {
+  if (!convId) return null;
+  try { const r = JSON.parse(store.get(CONV_PREFIX + "reply_" + convId) || "null"); if (r && r.jobId && Date.now() - r.at < CONV_MAX_AGE) return r; } catch { /* ignore */ }
+  return null;
 }
 function getConvRecord(convId) {
   if (!convId) return null;
@@ -124,7 +134,7 @@ async function loadDraftSnapshot() { // an email being written: details are read
   const me = Office.context.mailbox.userProfile;
   return { compose: true, subject: subject || "", from: from || (me ? { displayName: me.displayName, emailAddress: me.emailAddress } : null),
     to: to || [], cc: cc || [], bcc: bcc || [], date: new Date(), attachments: atts || [],
-    conversationId: undefined, internetMessageId: undefined, wbId, props };
+    conversationId: it.conversationId || undefined, internetMessageId: undefined, wbId, props };
 }
 
 // Runs whenever an email is opened: fills in the job from an earlier email in the same
@@ -717,7 +727,7 @@ async function findExisting(forJob, destFolderId, id) {
 }
 
 let dupRun = 0, justSaved = null; // justSaved = id of the job this email was just saved to
-function resetDup() { dupRun++; dupFound = false; savedAt = null; attOpen = false; $("dupNote").className = ""; $("dupNote").textContent = ""; }
+function resetDup() { dupRun++; dupFound = false; repliedOnly = false; savedAt = null; attOpen = false; $("dupNote").className = ""; $("dupNote").textContent = ""; }
 async function checkDuplicate() {
   resetDup(); refreshSend();
   const run = dupRun, forJob = job, item = cur, note = $("dupNote");
@@ -727,7 +737,7 @@ async function checkDuplicate() {
     const found = await findExisting(forJob, $("folder").value, await emailId(item));
     if (run !== dupRun || job !== forJob) return; // something changed meanwhile
     note.className = ""; note.textContent = "";
-    const both = found.some(isPdfDoc) && found.some(isEmlDoc);
+    let both = found.some(isPdfDoc) && found.some(isEmlDoc);
     if (found.length) {
       dupFound = both; // received emails show a green "Sent to Wunderbuild" button instead of a message
       if (both) {
@@ -736,6 +746,11 @@ async function checkDuplicate() {
       }
       if (isCompose()) note.textContent = both ? "This email was already saved to Wunderbuild. Save and send will update the saved copy, then send it." : "Part of this email was saved earlier. Save and send will save it again.";
       else if (!both) note.textContent = "Part of this email was saved earlier. Saving will add what is missing.";
+    }
+    // The email that was replied to (sent earlier than the saved reply) counts as saved when its reply was saved to this job.
+    if (!both && !isCompose()) {
+      const r = getReplyRecord(item.conversationId);
+      if (r && r.jobId === forJob._id && item.date && item.date.getTime() <= r.at) { dupFound = true; savedAt = new Date(r.at); repliedOnly = true; for (const row of $("attList").children) row.children[0].checked = false; found.length || (note.textContent = ""); }
     }
   } catch (e) { if (run === dupRun) { note.className = ""; note.textContent = `Could not check for an existing copy: ${e.message}`; } }
   if (run === dupRun) refreshSend();
@@ -1021,6 +1036,7 @@ $("send").addEventListener("click", async () => {
     // Remember which job this conversation was filed to (kept on this computer only).
     if (snap.compose && snap.wbId) store.set(sentKey(snap.subject, snap.to), snap.wbId); // so the sent copy is recognised as saved
     saveConvRecord(convId, jobAtSend);
+    if (snap.compose) saveReplyRecord(convId, jobAtSend);
     await markSaved(snap);
 
     let msg;
