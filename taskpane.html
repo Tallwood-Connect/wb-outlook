@@ -29,7 +29,8 @@
   #savedNote{margin-top:6px;color:var(--muted);font-size:12px;text-align:center} #savedNote:empty{display:none}
   #attOnlyBtn{width:100%;margin-top:10px;text-align:center}
   /* an email that is already filed shows only the tick button until "Save Attachments Only" is pressed */
-  #main.filed #nameBlock,#main.filed #corrNote,#main.filed:not(.attopen) #attSection{display:none!important}
+  #main.filed #nameBlock,#main.filed #corrNote,#main.filed:not(.attopen) #attSection,
+  #main.filed:not(.attopen) label[for="q"],#main.filed:not(.attopen) #q,#main.filed:not(.attopen) #jobs,#main.filed:not(.attopen) #matchNote,#main.filed:not(.attopen) #autoNote{display:none!important}
   #send.done{background:var(--soft);color:var(--accent);border:1px solid var(--accent)}
   #send.done:disabled{opacity:1}
   #send.done::before{content:"";display:inline-block;width:18px;height:18px;margin-right:8px;vertical-align:-4px;background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Ccircle cx='10' cy='10' r='10' fill='%232b976f'/%3E%3Cpath d='M5.5 10.5l3 3 6-6.5' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat}
@@ -86,7 +87,7 @@
 </style>
 </head>
 <body>
-<h1>Send to Wunderbuild <span id="ver" data-v="1.44">v1.44</span></h1>
+<h1>Send to Wunderbuild <span id="ver" data-v="1.46">v1.46</span></h1>
 
 <details id="settings">
   <summary>API settings</summary>
@@ -166,8 +167,8 @@
 <div id="status" role="status" aria-live="polite"></div>
 </div>
 
-<script src="pdf.js?v=1.44"></script>
-<script src="eml.js?v=1.44"></script>
-<script src="taskpane.js?v=1.44"></script>
+<script src="pdf.js?v=1.46"></script>
+<script src="eml.js?v=1.46"></script>
+<script src="taskpane.js?v=1.46"></script>
 </body>
 </html>
