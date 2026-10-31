@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
+  xmlns:mailappor="http://schemas.microsoft.com/office/mailappversionoverrides/1.0"
+  xsi:type="MailApp">
+  <Id>aabbef90-b8c4-49fb-81d6-4b3f273b47e3</Id>
+  <Version>1.0.0.15</Version>
+  <ProviderName>Tallwood</ProviderName>
+  <DefaultLocale>en-AU</DefaultLocale>
+  <DisplayName DefaultValue="Send to Wunderbuild"/>
+  <Description DefaultValue="Upload the open email to a Wunderbuild job as an .eml file."/>
+  <IconUrl DefaultValue="https://tallwood-connect.github.io/wb-outlook/assets/icon-64.png"/>
+  <HighResolutionIconUrl DefaultValue="https://tallwood-connect.github.io/wb-outlook/assets/icon-128.png"/>
+  <SupportUrl DefaultValue="https://www.wunderbuild.com"/>
+  <AppDomains>
+    <AppDomain>https://api.wunderbuild.com</AppDomain>
+  </AppDomains>
+  <Hosts><Host Name="Mailbox"/></Hosts>
+  <Requirements><Sets><Set Name="Mailbox" MinVersion="1.1"/></Sets></Requirements>
+  <FormSettings>
+    <Form xsi:type="ItemRead">
+      <DesktopSettings>
+        <SourceLocation DefaultValue="https://tallwood-connect.github.io/wb-outlook/taskpane.html"/>
+        <RequestedHeight>450</RequestedHeight>
+      </DesktopSettings>
+    </Form>
+    <Form xsi:type="ItemEdit">
+      <DesktopSettings>
+        <SourceLocation DefaultValue="https://tallwood-connect.github.io/wb-outlook/taskpane.html"/>
+      </DesktopSettings>
+    </Form>
+  </FormSettings>
+  <Permissions>ReadWriteItem</Permissions>
+  <Rule xsi:type="RuleCollection" Mode="Or">
+    <Rule xsi:type="ItemIs" ItemType="Message" FormType="Read"/>
+    <Rule xsi:type="ItemIs" ItemType="Message" FormType="Edit"/>
+  </Rule>
+  <DisableEntityHighlighting>false</DisableEntityHighlighting>
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/mailappversionoverrides" xsi:type="VersionOverridesV1_0">
+    <VersionOverrides xmlns="http://schemas.microsoft.com/office/mailappversionoverrides/1.1" xsi:type="VersionOverridesV1_1">
+      <Requirements><bt:Sets DefaultMinVersion="1.14"><bt:Set Name="Mailbox"/></bt:Sets></Requirements>
+      <Hosts>
+        <Host xsi:type="MailHost">
+          <Runtimes>
+            <Runtime resid="WebViewRuntime.Url">
+              <Override type="javascript" resid="JSRuntime.Url"/>
+            </Runtime>
+          </Runtimes>
+          <DesktopFormFactor>
+            <FunctionFile resid="Commands.Url"/>
+            <ExtensionPoint xsi:type="LaunchEvent">
+              <LaunchEvents>
+                <LaunchEvent Type="OnMessageSend" FunctionName="onMessageSendHandler" SendMode="PromptUser"/>
+                <LaunchEvent Type="OnNewMessageCompose" FunctionName="onNewMessageComposeHandler"/>
+              </LaunchEvents>
+              <SourceLocation resid="WebViewRuntime.Url"/>
+            </ExtensionPoint>
+            <ExtensionPoint xsi:type="MessageReadCommandSurface">
+              <OfficeTab id="TabDefault">
+                <Group id="wbGroup">
+                  <Label resid="Group.Label"/>
+                  <Control xsi:type="Button" id="wbButton">
+                    <Label resid="Button.Label"/>
+                    <Supertip>
+                      <Title resid="Button.Label"/>
+                      <Description resid="Button.Tip"/>
+                    </Supertip>
+                    <Icon>
+                      <bt:Image size="16" resid="Icon.16"/>
+                      <bt:Image size="32" resid="Icon.32"/>
+                      <bt:Image size="80" resid="Icon.80"/>
+                    </Icon>
+                    <Action xsi:type="ShowTaskpane">
+                      <SourceLocation resid="Taskpane.Url"/>
+                      <SupportsPinning>true</SupportsPinning>
+                    </Action>
+                  </Control>
+                </Group>
+              </OfficeTab>
+            </ExtensionPoint>
+            <ExtensionPoint xsi:type="MessageComposeCommandSurface">
+              <OfficeTab id="TabDefault">
+                <Group id="wbComposeGroup">
+                  <Label resid="Group.Label"/>
+                  <Control xsi:type="Button" id="wbComposeButton">
+                    <Label resid="Compose.Label"/>
+                    <Supertip>
+                      <Title resid="Compose.Label"/>
+                      <Description resid="Compose.Tip"/>
+                    </Supertip>
+                    <Icon>
+                      <bt:Image size="16" resid="Icon.16"/>
+                      <bt:Image size="32" resid="Icon.32"/>
+                      <bt:Image size="80" resid="Icon.80"/>
+                    </Icon>
+                    <Action xsi:type="ShowTaskpane">
+                      <SourceLocation resid="Compose.Url"/>
+                      <SupportsPinning>true</SupportsPinning>
+                    </Action>
+                  </Control>
+                </Group>
+              </OfficeTab>
+            </ExtensionPoint>
+          </DesktopFormFactor>
+        </Host>
+      </Hosts>
+      <Resources>
+        <bt:Images>
+          <bt:Image id="Icon.16" DefaultValue="https://tallwood-connect.github.io/wb-outlook/assets/icon-16.png"/>
+          <bt:Image id="Icon.32" DefaultValue="https://tallwood-connect.github.io/wb-outlook/assets/icon-32.png"/>
+          <bt:Image id="Icon.80" DefaultValue="https://tallwood-connect.github.io/wb-outlook/assets/icon-80.png"/>
+        </bt:Images>
+        <bt:Urls>
+          <bt:Url id="Taskpane.Url" DefaultValue="https://tallwood-connect.github.io/wb-outlook/taskpane.html"/>
+          <bt:Url id="Compose.Url" DefaultValue="https://tallwood-connect.github.io/wb-outlook/taskpane.html"/>
+          <bt:Url id="Commands.Url" DefaultValue="https://tallwood-connect.github.io/wb-outlook/launchevent.html?v=1.28"/>
+          <bt:Url id="WebViewRuntime.Url" DefaultValue="https://tallwood-connect.github.io/wb-outlook/launchevent.html?v=1.28"/>
+          <bt:Url id="JSRuntime.Url" DefaultValue="https://tallwood-connect.github.io/wb-outlook/launchevent.js?v=1.28"/>
+        </bt:Urls>
+        <bt:ShortStrings>
+          <bt:String id="Group.Label" DefaultValue="Wunderbuild"/>
+          <bt:String id="Button.Label" DefaultValue="Send to Wunderbuild"/>
+          <bt:String id="Compose.Label" DefaultValue="Save and send"/>
+        </bt:ShortStrings>
+        <bt:LongStrings>
+          <bt:String id="Button.Tip" DefaultValue="Upload this email to a Wunderbuild job."/>
+          <bt:String id="Compose.Tip" DefaultValue="Save this email to a Wunderbuild job, then send it."/>
+        </bt:LongStrings>
+      </Resources>
+    </VersionOverrides>
+  </VersionOverrides>
+</OfficeApp>

@@ -6,7 +6,7 @@
       "#wb-<code>", it fills that email in (recipients, subject, message above the Outlook signature, the
       published files attached from Wunderbuild). Every other new email is left untouched.
    Messages starting with [WB] go to the browser console, to help find problems. */
-const WB_LE_VERSION = "1.27";
+const WB_LE_VERSION = "1.28";
 const wbLog = (m) => { try { console.log(`[WB ${WB_LE_VERSION}] ${m}`); } catch (e) { /* no console */ } };
 wbLog("send-time script loaded");
 try { window.addEventListener("error", (e) => wbLog(`script error: ${e && e.message}`)); } catch (e) { /* not a browser page */ }
@@ -64,7 +64,7 @@ function wbNote(item, text, isError) {
     item.notificationMessages.replaceAsync("wbPublish", {
       type: isError ? Office.MailboxEnums.ItemNotificationMessageType.ErrorMessage
         : Office.MailboxEnums.ItemNotificationMessageType.InformationalMessage,
-      message: String(text).slice(0, 150), icon: "Icon.16x16", persistent: !isError,
+      message: String(text).slice(0, 150), icon: "Icon.16", persistent: !isError,
     }, () => {});
   } catch (e) { /* notifications unavailable */ }
 }
