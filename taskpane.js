@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.54"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.55"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -1256,7 +1256,16 @@ const loadSnapshot = () => (isCompose() ? loadDraftSnapshot() : loadReadSnapshot
 
 /* ---------- init ---------- */
 $("name").addEventListener("input", () => { nameEdited = true; refreshSend(); });
-["key", "base"].forEach((id) => $(id).addEventListener("change", () => store.set("wb_" + id, $(id).value.trim())));
+// The automatic handler (launchevent.js) fills in emails from Publish to Wunderbuild; it reads these settings,
+// with a roaming copy for Outlook versions where it can't share this page's storage.
+function syncRoamingApi() {
+  try {
+    const rs = Office.context.roamingSettings;
+    if (rs.get("wb_key") === $("key").value.trim() && rs.get("wb_base") === $("base").value.trim()) return;
+    rs.set("wb_key", $("key").value.trim()); rs.set("wb_base", $("base").value.trim()); rs.saveAsync(() => {});
+  } catch { /* roaming settings unavailable */ }
+}
+["key", "base"].forEach((id) => $(id).addEventListener("change", () => { store.set("wb_" + id, $(id).value.trim()); syncRoamingApi(); }));
 $("askSend").addEventListener("change", () => {
   try { const rs = Office.context.roamingSettings; rs.set("wb_ask", $("askSend").checked); rs.saveAsync(() => {}); } catch { /* settings unavailable */ }
 });
@@ -1325,6 +1334,7 @@ Office.onReady(async () => {
   $("subjPrefix").checked = store.get("wb_subjprefix") === "1";
   try { $("askSend").checked = Office.context.roamingSettings.get("wb_ask") === true; } catch { /* settings unavailable */ }
   if (!$("key").value) $("settings").open = true;
+  else syncRoamingApi();
   applyMode();
   // The pane stays open while other items are selected, and the same pane can show a received email or an email
   // being written (e.g. an inline reply), so the mode is re-checked every time the item changes.
