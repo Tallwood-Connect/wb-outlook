@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.56"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.57"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -988,7 +988,7 @@ $("signOut").addEventListener("click", () => {
   jobsCache = null; jobsAt = 0;
   purge((k) => k.startsWith("wb_"));
   $("key").value = ""; $("base").value = DEFAULT_BASE; $("fmtPdf").checked = true; $("askSend").checked = false; $("subjPrefix").checked = false; syncSwitch();
-  try { const rs = Office.context.roamingSettings; rs.set("wb_ask", false); rs.saveAsync(() => {}); } catch { /* ignore */ }
+  try { const rs = Office.context.roamingSettings; rs.set("wb_ask", false); rs.remove("wb_key"); rs.remove("wb_base"); rs.saveAsync(() => {}); } catch { /* ignore */ } // the copy kept in the mailbox goes too
   clearJob();
   $("clearNote").textContent = "Your key and all saved data were removed from this computer.";
 });
@@ -1260,9 +1260,13 @@ $("name").addEventListener("input", () => { nameEdited = true; refreshSend(); })
 // with a roaming copy for Outlook versions where it can't share this page's storage.
 function syncRoamingApi() {
   try {
-    const rs = Office.context.roamingSettings;
-    if (rs.get("wb_key") === $("key").value.trim() && rs.get("wb_base") === $("base").value.trim()) return;
-    rs.set("wb_key", $("key").value.trim()); rs.set("wb_base", $("base").value.trim()); rs.saveAsync(() => {});
+    const rs = Office.context.roamingSettings, key = $("key").value.trim(), baseUrl = $("base").value.trim();
+    if (!key) { // no key: nothing is kept in the mailbox either
+      if (rs.get("wb_key") === undefined && rs.get("wb_base") === undefined) return;
+      rs.remove("wb_key"); rs.remove("wb_base"); rs.saveAsync(() => {}); return;
+    }
+    if (rs.get("wb_key") === key && rs.get("wb_base") === baseUrl) return;
+    rs.set("wb_key", key); rs.set("wb_base", baseUrl); rs.saveAsync(() => {});
   } catch { /* roaming settings unavailable */ }
 }
 ["key", "base"].forEach((id) => $(id).addEventListener("change", () => { store.set("wb_" + id, $(id).value.trim()); syncRoamingApi(); }));
