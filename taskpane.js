@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.53"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.54"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -14,7 +14,6 @@ let job = null; // { _id, name }
 
 function setStatus(msg, kind = "") { const s = $("status"); s.textContent = msg; s.className = kind; }
 function base() { return ($("base").value.trim() || DEFAULT_BASE).replace(/\/+$/, ""); }
-// The main button: normal, or a green tick when this email is already saved in the job.
 // Finds a folder by name in a list of options: an exact top-level match first, otherwise one nested inside another folder.
 function findNamedOption(options, name) {
   const list = [...options], want = name.toLowerCase();
@@ -62,6 +61,7 @@ const plainError = (t) => String(t || "").replace(/<[^>]*>/g, " ").replace(/\s+/
 async function api(path, opts = {}) {
   const key = $("key").value.trim();
   if (!key) { $("settings").open = true; throw new Error("Add your Wunderbuild API key under API settings."); }
+  if (!/^https:\/\//i.test(base())) throw new Error("The API base URL must start with https:// (the key is never sent over an unprotected link).");
   for (let attempt = 0; ; attempt++) {
     let res;
     await apiSlot();
@@ -110,6 +110,9 @@ function getConvRecord(convId) {
 // Drops conversation records older than 90 days, and the oldest ones beyond 500.
 function pruneConv() {
   const recs = [];
+  for (const k of store.keys().filter((k) => k.startsWith("wb_sent_"))) { // sent-copy memory: same 90 days
+    try { const r = JSON.parse(store.get(k)); if (!(r && r.at && Date.now() - r.at < CONV_MAX_AGE)) store.remove(k); } catch { store.remove(k); }
+  }
   for (const k of store.keys().filter((k) => k.startsWith(CONV_PREFIX))) {
     try {
       const r = JSON.parse(store.get(k));
@@ -437,7 +440,7 @@ async function loadFolders() {
   foldersFailed = !!failed; // saving stays off: otherwise the files would land in the job's top level
   if (failed) setStatus(`${failed.message} Pick the job again to retry.`, "err"); else setStatus("");
   refreshSend();
-  if (!failed) checkDuplicate();
+  if (!failed && !foldersPending) checkDuplicate(); // otherwise it runs once the whole list is in
 }
 
 /* ---------- email -> .eml ---------- */
@@ -456,14 +459,21 @@ function b64ToBytes(b64) {
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
 }
+// Removes characters that make file names unsafe or misleading: control characters, invisible text-direction marks
+// (which can disguise a file type), and half-finished emoji pairs. Cuts by whole characters, not halves of an emoji.
+const cleanName = (t, max) => {
+  const c = String(t == null ? "" : t).replace(/[\u0000-\u001F\u007F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, "")
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
+  return max ? Array.from(c).slice(0, max).join("") : c;
+};
 function suggestName() {
   const item = cur;
   if (!item) return "";
   const d = item.date;
-  const day = d.toISOString().slice(0, 10);
+  const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; // local date, not UTC
   const noReply = (t) => t.replace(/^\s*((re|fw|fwd|aw|sv|vs)\s*:\s*)+/i, ""); // "RE:", "FW:" etc. do not belong in a file name
-  const subject = (noReply(stripPrefix(noReply(item.subject || ""))).replace(/\s+/g, " ").trim() || "No subject").replace(/[\\/:*?"<>|\r\n]+/g, " ").trim().slice(0, 100);
-  return `${day} - ${subject}`;
+  const subject = (noReply(stripPrefix(noReply(item.subject || ""))).replace(/\s+/g, " ").trim() || "No subject").replace(/[\\/:*?"<>|\r\n]+/g, " ").trim();
+  return `${day} - ${cleanName(subject, 100).trim()}`;
 }
 
 /* ---------- email details for the PDF ---------- */
@@ -528,7 +538,7 @@ function updatePickGo() { $("pickGo").disabled = sending || ![...$("pickList").q
 // Folders with names like Archive, Archived or Superseded are left out, so old versions are not attached by mistake.
 const isArchiveName = (n) => /archiv|supersed|supercede|obsolete/i.test(String(n || ""));
 let treeCache = null; // { jobId, root, promise }
-const TREE_KEY = (id) => "wb_folder_tree_" + id, TREE_MAX_AGE = 15 * 60 * 1000;
+const TREE_KEY = (id) => "wb_ftree_" + id, TREE_MAX_AGE = 15 * 60 * 1000;
 const dropTree = (jobId) => { treeCache = null; if (jobId) store.remove(TREE_KEY(jobId)); };
 function readSavedTree(jobId) { // the full folder list from a few minutes ago, kept on this computer
   try { const r = JSON.parse(store.get(TREE_KEY(jobId)) || "null"); if (r && Date.now() - r.at < TREE_MAX_AGE && Array.isArray(r.list)) return r.list; } catch { /* ignore */ }
@@ -545,7 +555,7 @@ function folderTrees(jobId) {
   if (treeCache && treeCache.jobId === jobId) return treeCache;
   const t = { jobId };
   const saved = readSavedTree(jobId);
-  if (saved) { t.root = Promise.resolve(saved); t.promise = t.root; }
+  if (saved) { t.root = Promise.resolve(saved); t.promise = t.root; t.full = saved; }
   else {
     let rootData = null;
     t.root = api(`/documents/job/${jobId}/folders`).then((r) => { rootData = r; return flattenTree(r); });
@@ -564,6 +574,7 @@ function folderTrees(jobId) {
       await Promise.all((rootData.subFolders || []).map((f) => expand(f, 1)));
       const out = flattenTree(rootData);
       store.set(TREE_KEY(jobId), JSON.stringify({ at: Date.now(), list: out }));
+      t.full = out;
       return out;
     });
   }
@@ -713,7 +724,7 @@ function buildEmailHtml({ subject, meta, bodyHtml, cid }) {
   const rows = meta.filter(([, v]) => v).map(([k, v]) =>
     `<tr><td style="padding:1px 10px 1px 0;font-weight:bold;vertical-align:top;white-space:nowrap">${escHtml(k)}</td><td style="padding:1px 0">${escHtml(v)}</td></tr>`).join("");
   return `<!doctype html><html><head><meta charset="utf-8">` +
-    `<meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none'">` +
+    `<meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'none'">` +
     `<style>img{max-width:100%!important;height:auto!important}*{break-inside:auto!important;page-break-inside:auto!important;min-height:0!important}div:empty,p:empty{display:none!important}</style></head><body style="margin:0">` + // keeps pictures in proportion
     `<div style="font:13px Arial,Helvetica,sans-serif;color:#000;border-bottom:1px solid #999;padding-bottom:10px;margin-bottom:14px">` +
     `<div style="font-size:18px;font-weight:bold;margin-bottom:8px">${escHtml(subject || "(No subject)")}</div><table style="border-collapse:collapse">${rows}</table></div>` +
@@ -763,11 +774,19 @@ async function emailId(item) {
 }
 
 async function listDocs(jobId, folderId) {
-  const out = [];
-  for (let page = 1; page <= 5; page++) {
-    const d = await api(`/documents/job/${jobId}?page=${page}&limit=100${folderId ? `&folderId=${folderId}` : ""}`);
-    out.push(...(d.result || []).filter((x) => !x.isDeleted));
-    if (!d.pagination || !d.pagination.hasNextPage) break;
+  const url = (page) => `/documents/job/${jobId}?page=${page}&limit=100${folderId ? `&folderId=${folderId}` : ""}`;
+  const first = await api(url(1));
+  let out = (first.result || []).filter((x) => !x.isDeleted);
+  const p = first.pagination || {};
+  if (p.totalPages > 1) { // the remaining pages are asked for together
+    const rest = await Promise.all(Array.from({ length: Math.min(p.totalPages, 30) - 1 }, (_, i) => api(url(i + 2))));
+    for (const d of rest) out = out.concat((d.result || []).filter((x) => !x.isDeleted));
+  } else if (p.hasNextPage) { // no page count given: go one page at a time
+    for (let page = 2; page <= 30; page++) {
+      const d = await api(url(page));
+      out = out.concat((d.result || []).filter((x) => !x.isDeleted));
+      if (!d.pagination || !d.pagination.hasNextPage) break;
+    }
   }
   return out;
 }
@@ -777,7 +796,7 @@ async function findExisting(forJob, destFolderId, id) {
   const corr = findNamedOption($("folder").options, "Correspondence");
   const folders = [...new Set([destFolderId, corr ? corr.value : destFolderId])];
   const lists = await Promise.all(folders.map(async (f) => {
-    const [docs, outlookId] = await Promise.all([listDocs(forJob._id, f), findOutlookFolderId(f)]);
+    const [docs, outlookId] = await Promise.all([listDocs(forJob._id, f), findOutlookFolderId(f, forJob._id)]);
     return [...docs, ...(outlookId ? await listDocs(forJob._id, outlookId) : [])];
   }));
   return lists.flat().filter((d) => (d.name || "").includes(`[${id}]`));
@@ -882,7 +901,7 @@ function selectedAttachments() {
 function finalName(typed, original) { // the typed name plus the original file's extension
   const ext = (original.match(/\.[A-Za-z0-9]{1,10}$/) || [""])[0];
   const stem = ext ? original.slice(0, -ext.length) : original;
-  const n = (typed || "").trim().replace(/[\\/:*?"<>|]+/g, "_") || stem;
+  const n = cleanName(typed).trim().replace(/[\\/:*?"<>|]+/g, "_") || stem;
   return ext && n.toLowerCase().endsWith(ext.toLowerCase()) ? n : n + ext;
 }
 // Emails being written do not report an attachment's type, so it is worked out from the file extension.
@@ -906,10 +925,10 @@ function getAttachment(a) {
 }
 
 /* ---------- upload ---------- */
-async function uploadFile(name, type, bytes, folderId) {
+async function uploadFile(name, type, bytes, folderId, jobId = job._id) {
   let docId = null;
   try {
-    const doc = await api(`/documents/job/${job._id}`, {
+    const doc = await api(`/documents/job/${jobId}`, {
       method: "POST",
       body: JSON.stringify({ name, type, size: bytes.length, ...(folderId ? { folderId } : {}) }),
     });
@@ -930,31 +949,39 @@ async function uploadFile(name, type, bytes, folderId) {
     if (!put.ok) throw new Error(`Upload of ${name} failed (${put.status}).`);
     return doc;
   } catch (e) {
-    if (docId) { try { await api(`/documents/job/${job._id}/${docId}`, { method: "DELETE" }); } catch { /* best effort */ } }
+    if (docId) { try { await api(`/documents/job/${jobId}/${docId}`, { method: "DELETE" }); } catch { /* best effort */ } }
     throw e;
   }
 }
 
 // Finds (or creates) a sub-folder called "Outlook Files" inside parentId (or the job root when empty).
-async function findOutlookFolderId(parentId) {
-  const detail = await api(parentId ? `/documents/job/${job._id}/folders/${parentId}` : `/documents/job/${job._id}/folders`);
+// A folder list fetched a moment ago answers "yes, it is there" without another request; "not there" is always checked.
+async function findOutlookFolderId(parentId, jobId = job._id) {
+  const t = treeCache && treeCache.jobId === jobId ? treeCache.full : null;
+  if (t) {
+    const parent = t.find((f) => f.id === parentId);
+    const want = (parent && parent.id ? parent.path + " / " : "") + "Outlook Files";
+    const hit = parent && t.find((f) => f.path.toLowerCase() === want.toLowerCase());
+    if (hit) return hit.id;
+  }
+  const detail = await api(parentId ? `/documents/job/${jobId}/folders/${parentId}` : `/documents/job/${jobId}/folders`);
   const hit = (detail.subFolders || []).find((f) => (f.name || "").trim().toLowerCase() === "outlook files");
   return hit ? hit._id : null;
 }
-async function ensureOutlookFolder(parentId) {
-  const existing = await findOutlookFolderId(parentId);
+async function ensureOutlookFolder(parentId, jobId = job._id) {
+  const existing = await findOutlookFolderId(parentId, jobId);
   if (existing) return existing;
-  const created = await api(`/documents/job/${job._id}/folders`, {
+  const created = await api(`/documents/job/${jobId}/folders`, {
     method: "POST",
     body: JSON.stringify({ name: "Outlook Files", ...(parentId ? { parentId } : {}) }),
   });
-  dropTree(job && job._id); // the folder list has changed
+  dropTree(jobId); // the folder list has changed
   return created._id;
 }
 
 $("clearCache").addEventListener("click", () => {
   jobsCache = null; jobsAt = 0;
-  purge((k) => k === JOBS_KEY || k === "wb_job" || k.startsWith("wb_folder_") || k.startsWith(CONV_PREFIX));
+  purge((k) => k === JOBS_KEY || k === "wb_job" || k.startsWith("wb_ftree_") || k.startsWith("wb_sent_") || k.startsWith(CONV_PREFIX));
   $("clearNote").textContent = "Saved job list and conversation history cleared.";
 });
 $("signOut").addEventListener("click", () => {
@@ -1010,7 +1037,7 @@ $("send").addEventListener("click", async () => {
   lastResult = null;
   sending = true; lockUI(true); $("send").disabled = true;
   try {
-    const baseName = $("name").value.trim().replace(/\.(eml|pdf|msg)$/i, "");
+    const baseName = cleanName($("name").value).trim().replace(/\.(eml|pdf|msg)$/i, "");
     if (corrMissing && job) { setStatus("Creating Correspondence folder…", "busy"); await createCorrespondence(job); }
     const folderId = $("folder").value, folderLabel = $("folder").selectedOptions[0].text;
     const attFolderId = $("attFolder").value, attFolderLabel = $("attFolder").selectedOptions[0].text;
@@ -1044,6 +1071,11 @@ $("send").addEventListener("click", async () => {
 
     // Check, right now, whether this email is already in the job (e.g. a colleague saved it first).
     const id = await idPromise;
+    // The formatted PDF takes the longest, so it starts now, alongside the check below (unless the panel already knows it is saved).
+    const renderP = useFmt && (snap.compose || !dupFound)
+      ? (async () => renderPdf(buildEmailHtml({ subject, meta, bodyHtml, cid: buildCidMap(bodyHtml, inl) })))()
+      : Promise.resolve(null);
+    renderP.catch(() => {}); // a failure is reported where the result is used
     let existing = [];
     try { setStatus("Checking for an existing copy…", "busy"); existing = await findExisting(jobAtSend, folderId, id); }
     catch (e) { problems.push(`could not check for an existing copy (${e.message})`); }
@@ -1057,24 +1089,29 @@ $("send").addEventListener("click", async () => {
     if (useFmt && needPdf) {
       try {
         setStatus("Rendering formatted PDF…", "busy");
-        const cid = buildCidMap(bodyHtml, inl);
-        pdf = await renderPdf(buildEmailHtml({ subject, meta, bodyHtml, cid }));
+        pdf = await renderP;
+        if (!pdf) pdf = await renderPdf(buildEmailHtml({ subject, meta, bodyHtml, cid: buildCidMap(bodyHtml, inl) }));
       } catch (e) { problems.push(`formatted PDF unavailable (${e.message}), so a basic text PDF was saved instead`); }
     }
-    let newPdfOk = false, newEmlOk = false;
-    if (needPdf) {
+    let newPdfOk = false, newEmlOk = false, emlDoc = null;
+    // The PDF and the original email are saved together; a failed PDF stops everything, a failed original email is only reported.
+    const pdfJob = needPdf ? (async () => {
       if (!pdf) pdf = emailToPdf({ subject, meta, body: bodyText });
-      setStatus("Saving PDF…", "busy");
-      await uploadFile(`${fileBase}.pdf`, "application/pdf", pdf, folderId);
+      await uploadFile(`${fileBase}.pdf`, "application/pdf", pdf, folderId, jobAtSend._id);
       newPdfOk = true;
-    }
-    if (needEml) {
+    })() : Promise.resolve();
+    const emlJob = needEml ? (async () => {
       try {
-        setStatus("Saving original email to Outlook Files…", "busy");
-        const outlookFolderId = await ensureOutlookFolder(folderId);
-        await uploadFile(`${fileBase}.eml`, "message/rfc822", eml, outlookFolderId);
+        const outlookFolderId = await ensureOutlookFolder(folderId, jobAtSend._id);
+        emlDoc = await uploadFile(`${fileBase}.eml`, "message/rfc822", eml, outlookFolderId, jobAtSend._id);
         newEmlOk = true;
       } catch (e) { problems.push(`original email not saved (${e.message})`); }
+    })() : Promise.resolve();
+    if (needPdf || needEml) setStatus(`Saving ${needPdf && needEml ? "PDF and original email" : needPdf ? "PDF" : "original email"}…`, "busy");
+    const [pdfDone] = await Promise.allSettled([pdfJob, emlJob]);
+    if (pdfDone.status === "rejected") { // nothing half-saved: take back the original email that was saved alongside
+      if (emlDoc) { try { await api(`/documents/job/${jobAtSend._id}/${emlDoc._id}`, { method: "DELETE" }); } catch { /* best effort */ } }
+      throw pdfDone.reason;
     }
     if (replace) { // the new copies are in, so the earlier copies of this draft can go
       try {
@@ -1083,18 +1120,26 @@ $("send").addEventListener("click", async () => {
       } catch (e) { problems.push(`the earlier saved copy could not be removed (${e.message})`); }
     }
 
-    let savedAtts = 0, n = 0;
-    for (const r of got) {
-      if (!r.f) { problems.push(`${r.att.name}: ${r.e.message}`); continue; }
-      try {
-        setStatus(`Saving attachment ${++n} of ${atts.length}…`, "busy");
-        await uploadFile(finalName(r.typed, r.f.name), r.f.type, r.f.bytes, perFile ? r.folder : attFolderId);
-        savedAtts++; r.cb.checked = false; // done: no need to save it again
-      } catch (e) { problems.push(`${r.att.name}: ${e.message}`); }
-    }
+    // Attachments: three at a time, reported in their original order.
+    let savedAtts = 0, started = 0;
+    const attResult = new Array(got.length);
+    let nextAtt = 0;
+    const attWorker = async () => {
+      while (nextAtt < got.length) {
+        const i = nextAtt++, r = got[i];
+        if (!r.f) { attResult[i] = `${r.att.name}: ${r.e.message}`; continue; }
+        try {
+          setStatus(`Saving attachment ${++started} of ${atts.length}…`, "busy");
+          await uploadFile(finalName(r.typed, r.f.name), r.f.type, r.f.bytes, perFile ? r.folder : attFolderId, jobAtSend._id);
+          savedAtts++; r.cb.checked = false; // done: no need to save it again
+        } catch (e) { attResult[i] = `${r.att.name}: ${e.message}`; }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, got.length) }, attWorker));
+    for (const m of attResult) if (m) problems.push(m);
 
     // Remember which job this conversation was filed to (kept on this computer only).
-    if (snap.compose && snap.wbId) store.set(sentKey(snap.subject, snap.to), snap.wbId); // so the sent copy is recognised as saved
+    if (snap.compose && snap.wbId) store.set(sentKey(snap.subject, snap.to), JSON.stringify({ at: Date.now(), id: snap.wbId })); // so the sent copy is recognised as saved
     saveConvRecord(convId, jobAtSend);
     if (snap.compose) saveReplyRecord(convId, jobAtSend);
     await markSaved(snap);
@@ -1189,9 +1234,13 @@ async function refreshForItem(keepStatus) {
   refreshSend();
   await smartFill();
 }
-// A reply that was saved while being written keeps its reference on the sent copy, so the sent copy is recognised as already saved.
+// A reply saved while being written keeps its reference on the sent copy, so the sent copy is recognised as already saved.
 // Fallback for a sent reply whose saved reference did not travel with it: same subject and recipients as when it was saved.
 const sentKey = (subject, to) => "wb_sent_" + hash40(`${String(subject || "").trim()}|${(to || []).map((a) => String((a && a.emailAddress) || "").toLowerCase()).sort().join(",")}`.toLowerCase());
+function readSentRecord(key) {
+  try { const r = JSON.parse(store.get(key) || "null"); if (r && r.id && Date.now() - r.at < CONV_MAX_AGE) return String(r.id); } catch { /* ignore */ }
+  return null;
+}
 async function loadReadSnapshot() {
   const snap = readSnapshot();
   const it = Office.context.mailbox.item;
@@ -1199,7 +1248,7 @@ async function loadReadSnapshot() {
     const props = await asyncVal((cb) => it.loadCustomPropertiesAsync(cb));
     const wbId = props && props.get("wbId");
     if (wbId) snap.wbId = String(wbId);
-    else { const k = store.get(sentKey(snap.subject, snap.to)); if (k) snap.wbId = k; }
+    else { const k = readSentRecord(sentKey(snap.subject, snap.to)); if (k) snap.wbId = k; }
   }
   return snap;
 }
