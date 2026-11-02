@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.58"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.59"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -212,7 +212,7 @@ function renderJobList(jobs) {
 
 /* ---------- job details in the subject (emails being written only) ---------- */
 let appliedPrefix = ""; // the text this add-in last put at the start of the subject
-function subjectPrefixOn() { return isCompose() && store.get("wb_subjprefix") === "1"; }
+function subjectPrefixOn() { return isCompose() && $("subjPrefix").checked; }
 function buildPrefix(j) { // e.g. "J-01067 - Smith (#12 Oak Street, PERTH)"
   const num = fullJobNo(j);
   const name = String(j.name || "").replace(/\s*[-–]\s*D\s*$/i, "").trim(); // drops a trailing "- D"
@@ -221,13 +221,17 @@ function buildPrefix(j) { // e.g. "J-01067 - Smith (#12 Oak Street, PERTH)"
   const place = [street, String(j.city || "").trim().toUpperCase()].filter(Boolean).join(", ");
   return [num, name].filter(Boolean).join(" - ") + (place ? ` (${place})` : "");
 }
-function stripPrefix(subject) { // the subject without the job details this add-in added
-  const t = subject || "";
-  if (appliedPrefix && t.startsWith(appliedPrefix)) return t.slice(appliedPrefix.length).replace(/^[\s:\-–]+/, "");
-  // also recognise details added earlier (e.g. before the panel was reopened): "J-01067 - Name (#12 Street, SUBURB) - "
+const LEAD_RE = /^(\s*(?:(?:re|fw|fwd|aw|sv|vs)\s*:\s*)+)/i; // "Re: ", "Fwd: " etc. put in front by replying or forwarding
+function splitSubject(subject) { // { lead: "Re: ", rest: the subject without that lead or the job details }
+  let t = subject || "", lead = "";
+  const l = LEAD_RE.exec(t);
+  if (l) { lead = l[1]; t = t.slice(lead.length); }
+  if (appliedPrefix && t.startsWith(appliedPrefix)) return { lead, rest: t.slice(appliedPrefix.length).replace(/^[\s:\-–]+/, "") };
+  // also recognise details added earlier (e.g. before the panel was reopened, or in an email being replied to or forwarded): "J-01067 - Name (#12 Street, SUBURB) - "
   const m = /^J-\d{5,}(?: - [^()]*?)?(?: \([^()]*\))?(?:\s*-\s*|\s*$)/.exec(t);
-  return m ? t.slice(m[0].length) : t;
+  return { lead, rest: m ? t.slice(m[0].length) : t };
 }
+function stripPrefix(subject) { const p = splitSubject(subject); return p.lead + p.rest; } // keeps any "Re: " in front
 let subjRun = 0, subjBusy = false;
 async function applySubjectPrefix(remove) {
   if (!isCompose() || !cur) return;
@@ -237,9 +241,9 @@ async function applySubjectPrefix(remove) {
     const it = Office.context.mailbox.item;
     const now = await asyncVal((cb) => it.subject.getAsync(cb));
     if (run !== subjRun || now == null) return;
-    const rest = stripPrefix(now);
+    const { lead, rest } = splitSubject(now); // a "Re: " / "Fwd: " in front is kept; job details already present are replaced, never doubled
     const prefix = remove || !job ? "" : buildPrefix(job);
-    const next = prefix ? `${prefix} - ${rest}` : rest; // ends "- " ready for the person to type
+    const next = prefix ? `${lead}${prefix} - ${rest}` : lead + rest; // ends "- " ready for the person to type
     appliedPrefix = prefix;
     if (next.trimEnd() === now.trimEnd()) return; // Outlook may trim the trailing space
     cur.subject = next; subjBusy = true; // so the live watcher does not treat this as the person typing
@@ -1235,12 +1239,13 @@ function startSubjectWatch() {
       cur.subject = subject;
       if (!nameEdited) { $("name").value = suggestName(); refreshSend(); }
       // Auto subject: put the job details back if they were deleted or damaged by hand
-      if (subjectPrefixOn() && job && !jobAuto && !subject.startsWith(buildPrefix(job))) { await applySubjectPrefix(); return; }
+      if (subjectPrefixOn() && job && !jobAuto && !subject.replace(LEAD_RE, "").startsWith(buildPrefix(job))) { await applySubjectPrefix(); return; }
       // the subject changed: suggest jobs again, unless a job was picked by hand
       if (!job || jobAuto) { if (job) clearJob(); autoMatch(); }
     } catch { /* draft closed or Outlook busy: try again next time */ }
   }, 2000);
 }
+let lastComposeItem = null;
 async function refreshForItem(keepStatus) {
   const run = ++snapRun;
   justSaved = null;
@@ -1249,6 +1254,10 @@ async function refreshForItem(keepStatus) {
   if (run !== snapRun) return; // another email was selected meanwhile
   cur = snap;
   nameEdited = false; appliedPrefix = "";
+  if (isCompose() && lastComposeItem !== Office.context.mailbox.item) { // every email being written starts on Auto
+    lastComposeItem = Office.context.mailbox.item;
+    $("subjPrefix").checked = true; syncSwitch();
+  }
   $("name").value = suggestName();
   renderAttachments();
   if (!keepStatus) setStatus("");
@@ -1436,7 +1445,6 @@ $("refreshDraft").addEventListener("click", async () => {
 function syncSwitch() { $("swAuto").classList.toggle("on", $("subjPrefix").checked); $("swManual").classList.toggle("on", !$("subjPrefix").checked); }
 $("subjPrefix").addEventListener("change", () => {
   syncSwitch();
-  store.set("wb_subjprefix", $("subjPrefix").checked ? "1" : "0");
   applySubjectPrefix(!$("subjPrefix").checked); // switching it off takes the added text back out
 });
 $("attMode").addEventListener("change", () => {
@@ -1488,7 +1496,7 @@ Office.onReady(async () => {
   $("key").value = store.get("wb_key") || "";
   $("base").value = store.get("wb_base") || DEFAULT_BASE;
   $("fmtPdf").checked = store.get("wb_fmtpdf") !== "0";
-  $("subjPrefix").checked = store.get("wb_subjprefix") === "1";
+  $("subjPrefix").checked = true; // Auto is always the starting choice
   try { $("askSend").checked = Office.context.roamingSettings.get("wb_ask") === true; } catch { /* settings unavailable */ }
   if (!$("key").value) $("settings").open = true;
   else syncRoamingApi();
