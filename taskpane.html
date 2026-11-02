@@ -84,11 +84,15 @@
   @media (prefers-reduced-motion:reduce){.busy::before{animation-duration:2.4s}}
   input:disabled,select:disabled{opacity:.6}
 
+  #help{margin-top:14px}
+  #help .hint{margin:6px 0 0;color:var(--muted);font-size:12px}
+  #diagNote{margin-top:6px;font-size:12px;color:var(--muted)} #diagNote:empty{display:none} #diagNote.ok{color:var(--ok)} #diagNote.err{color:var(--bad)}
+  #diagOut{width:100%;margin-top:8px;font:11px Consolas,monospace;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:4px}
   #status.err{color:var(--bad)} #status.ok{color:var(--ok)}
 </style>
 </head>
 <body>
-<h1>Send to Wunderbuild <span id="ver" data-v="1.57">v1.48</span></h1>
+<h1>Send to Wunderbuild <span id="ver" data-v="1.58">v1.48</span></h1>
 
 <details id="settings">
   <summary>API settings</summary>
@@ -143,7 +147,7 @@
     <select id="pickFolder"></select>
     <div id="pickList" role="group" aria-label="Files in this folder"></div>
     <div class="btns">
-      <button type="button" id="pickGo" disabled>Attach selected</button>
+      <button type="button" class="sec" id="pickGo" disabled>Attach selected</button>
     </div>
     <div id="pickStatus" role="status"></div>
   </div>
@@ -168,8 +172,21 @@
 <div id="status" role="status" aria-live="polite"></div>
 </div>
 
-<script src="pdf.js?v=1.57"></script>
-<script src="eml.js?v=1.57"></script>
-<script src="taskpane.js?v=1.57"></script>
+<details id="help">
+  <summary>Troubleshooter</summary>
+  <p class="hint">Something not working? Press the button to collect technical details (these include the open email's subject and attachment names, but never your key or the text of your emails). Then email them, or save them as a text file.</p>
+  <button type="button" class="sec" id="diagRun">Collect information</button>
+  <div id="diagNote" role="status"></div>
+  <div id="diagBtns" class="btns" hidden>
+    <button type="button" class="sec" id="diagEmail">Email to Jason</button>
+    <button type="button" class="sec" id="diagSave">Save as text file</button>
+    <button type="button" class="sec" id="diagCopy">Copy</button>
+  </div>
+  <textarea id="diagOut" readonly rows="8" hidden aria-label="Troubleshooting report"></textarea>
+</details>
+
+<script src="pdf.js?v=1.58"></script>
+<script src="eml.js?v=1.58"></script>
+<script src="taskpane.js?v=1.58"></script>
 </body>
 </html>

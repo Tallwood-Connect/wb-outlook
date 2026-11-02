@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.57"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.58"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -10,9 +10,24 @@ const store = {
 };
 // Removes every saved item whose name matches the test.
 const purge = (test) => store.keys().filter(test).forEach((k) => store.remove(k));
+// A short record of what the add-in did and what went wrong, for the troubleshooting report (never holds the key).
+const DIAG_KEY = "wb_diag_log", DIAG_MAX = 60;
+let diagLog = [];
+try { diagLog = JSON.parse(store.get(DIAG_KEY) || "[]").slice(-DIAG_MAX); } catch { diagLog = []; }
+function diag(kind, msg) {
+  try {
+    diagLog.push({ t: Date.now(), k: kind, m: String(msg).replace(/\s+/g, " ").slice(0, 300) });
+    if (diagLog.length > DIAG_MAX) diagLog = diagLog.slice(-DIAG_MAX);
+    store.set(DIAG_KEY, JSON.stringify(diagLog));
+  } catch { /* logging must never get in the way */ }
+}
+try {
+  window.addEventListener("error", (e) => diag("script error", `${e.message} (${(e.filename || "").split("/").pop()}:${e.lineno})`));
+  window.addEventListener("unhandledrejection", (e) => diag("script error", `unhandled: ${e.reason && e.reason.message ? e.reason.message : e.reason}`));
+} catch { /* not a browser page */ }
 let job = null; // { _id, name }
 
-function setStatus(msg, kind = "") { const s = $("status"); s.textContent = msg; s.className = kind; }
+function setStatus(msg, kind = "") { const s = $("status"); s.textContent = msg; s.className = kind; if (kind === "err" && msg) diag("problem", msg); }
 function base() { return ($("base").value.trim() || DEFAULT_BASE).replace(/\/+$/, ""); }
 // Finds a folder by name in a list of options: an exact top-level match first, otherwise one nested inside another folder.
 function findNamedOption(options, name) {
@@ -65,14 +80,17 @@ async function api(path, opts = {}) {
   for (let attempt = 0; ; attempt++) {
     let res;
     await apiSlot();
+    const began = Date.now();
     try {
       res = await fetch(base() + path, {
         ...opts,
         headers: { "x-api-key": key, "Content-Type": "application/json", ...(opts.headers || {}) },
       });
     } catch (err) {
+      diag("network", `${opts.method || "GET"} ${path.split("?")[0]} failed after ${Date.now() - began} ms (${err && err.message})`);
       throw new Error(`Request to ${base()}${path.split("?")[0]} was blocked or failed (${err && err.message}). Check the API base URL and the proxy settings.`);
     } finally { apiFree(); }
+    if (!res.ok) diag("api", `${opts.method || "GET"} ${path.split("?")[0]} -> ${res.status} after ${Date.now() - began} ms${attempt ? ` (try ${attempt + 1})` : ""}`);
     if (res.status === 429 && attempt < 5) {
       const ra = Number(res.headers && res.headers.get && res.headers.get("retry-after"));
       await sleep(Math.min(10000, (ra > 0 ? ra * 1000 : 1000 * 2 ** attempt) + Math.random() * 400));
@@ -1036,6 +1054,8 @@ $("send").addEventListener("click", async () => {
   if (sending) return;
   lastResult = null;
   sending = true; lockUI(true); $("send").disabled = true;
+  const saveStart = Date.now();
+  diag("save", `started (${isCompose() ? "email being written" : "received email"})`);
   try {
     const baseName = cleanName($("name").value).trim().replace(/\.(eml|pdf|msg)$/i, "");
     if (corrMissing && job) { setStatus("Creating Correspondence folder…", "busy"); await createCorrespondence(job); }
@@ -1170,6 +1190,7 @@ $("send").addEventListener("click", async () => {
         problems.push("not sent");
       }
     }
+    diag("save", `finished in ${Math.round((Date.now() - saveStart) / 100) / 10} s${problems.length ? ` with ${problems.length} problem(s)` : ""}`);
     lastResult = { msg, kind: problems.length ? "err" : "ok", subject: snap.subject };
     setStatus(msg, lastResult.kind);
   } catch (e) {
@@ -1253,6 +1274,138 @@ async function loadReadSnapshot() {
   return snap;
 }
 const loadSnapshot = () => (isCompose() ? loadDraftSnapshot() : loadReadSnapshot());
+
+
+/* ---------- troubleshooter ---------- */
+const SUPPORT_EMAIL = "jason@tallwood.com.au"; // where the report is emailed
+let diagText = "";
+const hms = (t) => new Date(t).toLocaleTimeString("en-AU", { hour12: false });
+function describeError(e) { return e && e.message ? e.message : String(e); }
+// Runs one connection check with a time limit and reports how long it took.
+async function timedCheck(label, fn) {
+  const t0 = Date.now();
+  try {
+    const out = await Promise.race([fn(), new Promise((_, rej) => setTimeout(() => rej(new Error("no answer after 20 s")), 20000))]);
+    return `${label}: OK in ${Date.now() - t0} ms${out ? ` (${out})` : ""}`;
+  } catch (e) { return `${label}: FAILED after ${Date.now() - t0} ms - ${describeError(e)}`; }
+}
+async function buildReport() {
+  const L = [], add = (s = "") => L.push(s);
+  const key = $("key").value.trim();
+  const safe = (t) => { let o = String(t); if (key) o = o.split(key).join("[key]"); return o; }; // the key can never end up in the report
+  const now = new Date();
+  add("SEND TO WUNDERBUILD - TROUBLESHOOTING REPORT");
+  let zone = ""; try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { /* ignore */ }
+  add(`Created: ${now.toLocaleString("en-AU")} (${zone}, ${now.toISOString()})`);
+  const ver = $("ver").dataset.v;
+  add(`Add-in version: v${APP_VERSION}${ver === APP_VERSION ? "" : ` (taskpane.html is v${ver}: files out of sync)`}`);
+  try { const me = Office.context.mailbox.userProfile; add(`Reported by: ${me.displayName} <${me.emailAddress}>`); } catch { add("Reported by: unknown"); }
+
+  add(); add("== OUTLOOK AND COMPUTER ==");
+  try { const d = Office.context.mailbox.diagnostics; add(`Outlook: ${d.hostName} ${d.hostVersion}${d.OWAView ? `, web view ${d.OWAView}` : ""}`); } catch { add("Outlook: not reported"); }
+  try { add(`Platform: ${Office.context.platform}`); } catch { /* ignore */ }
+  try { const d = Office.context.diagnostics; add(`Office host: ${d.platform} ${d.version}`); } catch { /* ignore */ }
+  try {
+    const sets = []; for (let i = 1; i <= 15; i++) if (Office.context.requirements.isSetSupported("Mailbox", `1.${i}`)) sets.push(`1.${i}`);
+    add(`Mailbox requirement sets supported: ${sets.join(", ") || "none reported"}`);
+  } catch { add("Mailbox requirement sets: not reported"); }
+  const item = Office.context.mailbox.item;
+  const feat = (name, ok) => `${name}: ${ok ? "yes" : "NO"}`;
+  add("Features: " + [feat("send from add-in", item && typeof item.sendAsync === "function"), feat("export email to file", item && typeof item.getAsFileAsync === "function"),
+    feat("attach files", item && typeof item.addFileAttachmentFromBase64Async === "function"), feat("draft properties", item && typeof item.loadCustomPropertiesAsync === "function")].join(" | "));
+  try { add(`Browser: ${navigator.userAgent}`); add(`Window: ${window.innerWidth} x ${window.innerHeight} | language ${navigator.language} | online ${navigator.onLine}`); } catch { add("Browser: not reported"); }
+  let ls = "yes"; try { localStorage.setItem("wb_probe", "1"); localStorage.removeItem("wb_probe"); } catch { ls = "NO"; }
+  let rsOk = "yes"; try { Office.context.roamingSettings.get("wb_ask"); } catch { rsOk = "NO"; }
+  add(`Browser storage works: ${ls} | Outlook settings work: ${rsOk}`);
+
+  add(); add("== EMAIL OPEN IN THE PANEL ==");
+  try {
+    add(`Mode: ${isCompose() ? "email being written" : "received/sent email being read"}`);
+    if (cur) {
+      add(`Subject: ${cur.subject || "(none)"}`);
+      add(`From: ${fmtAddr(cur.from)} | To: ${(cur.to || []).length} | Cc: ${(cur.cc || []).length}`);
+      add(`Date: ${cur.date ? cur.date.toLocaleString("en-AU") : "?"} | conversation id: ${cur.conversationId ? "yes" : "no"} | message id: ${cur.internetMessageId ? "yes" : "no"} | saved reference: ${cur.wbId || "none"}`);
+      const atts = cur.attachments || [];
+      add(`Attachments: ${atts.length}${atts.length ? " - " + atts.map((a) => `${a.name} (${Math.round((a.size || 0) / 1024)} KB${a.isInline ? ", inline" : ""})`).join("; ") : ""}`);
+    } else add("No email loaded in the panel.");
+  } catch (e) { add(`Could not read the email: ${describeError(e)}`); }
+
+  add(); add("== ADD-IN STATE ==");
+  add(`Job: ${job ? `${fullJobNo(job)} ${job.name} (${job._id})` : "none chosen"}${jobAuto ? " (filled in automatically)" : ""}`);
+  add(`Folders: ${$("folder").options.length} listed | email folder: ${$("folder").selectedOptions[0] ? $("folder").selectedOptions[0].text : "-"} | attachment folder: ${$("attFolder").selectedOptions[0] ? $("attFolder").selectedOptions[0].text : "-"}`);
+  add(`Folder list failed: ${foldersFailed} | still loading: ${foldersPending} | Correspondence missing: ${corrMissing}`);
+  add(`Already saved: ${dupFound}${savedAt ? ` (${savedAt.toLocaleString("en-AU")})` : ""}${repliedOnly ? " - because a reply was saved" : ""} | saving now: ${sending}`);
+  add(`File name box: ${$("name").value} | edited by hand: ${nameEdited} | attachment folders: ${$("attMode").checked ? "individual" : "one folder"}`);
+  add(`Send button: "${$("send").textContent}" ${$("send").disabled ? "(disabled)" : "(enabled)"}`);
+  add(`Status line: ${$("status").textContent || "(empty)"}`);
+  let askOn = "?"; try { askOn = Office.context.roamingSettings.get("wb_ask") === true; } catch { /* ignore */ }
+  add(`Settings: formatted PDF ${$("fmtPdf").checked} | auto subject ${$("subjPrefix").checked} | ask before sending ${askOn}`);
+  let root = ""; try { root = new URL(base()).host; } catch { root = "(not a valid address)"; }
+  add(`API: key ${key ? `set (${key.length} characters)` : "NOT SET"} | address ${base()} | host ${root} | https ${/^https:/i.test(base())}`);
+  try { const rs = Office.context.roamingSettings; add(`Key copy kept in Outlook settings: ${rs.get("wb_key") ? "yes" : "no"}`); } catch { /* ignore */ }
+  const keys = store.keys().filter((k) => k.startsWith("wb_")).map((k) => `${k.replace(/_[0-9a-f]{24}$/i, "_<id>")}`);
+  const counts = {}; for (const k of keys) counts[k] = (counts[k] || 0) + 1;
+  add(`Saved on this computer: ${Object.entries(counts).map(([k, n]) => (n > 1 ? `${k} x${n}` : k)).join(", ") || "nothing"}`);
+  add(`Job list in memory: ${jobsCache ? `${jobsCache.length} jobs, loaded ${Math.round((Date.now() - jobsAt) / 60000)} min ago` : "not loaded"}`);
+
+  add(); add("== CONNECTION CHECKS ==");
+  if (!key) add("Skipped: no API key is set.");
+  else {
+    add(await timedCheck("Wunderbuild job list", async () => { const d = await api("/jobs?page=1&limit=1"); return `${(d.pagination && d.pagination.totalCount) || (d.result || []).length} job(s) reported`; }));
+    if (job) add(await timedCheck("Folders of the chosen job", async () => { const d = await api(`/documents/job/${job._id}/folders`); return `${(d.subFolders || []).length} top-level folders`; }));
+    else add("Folders of the chosen job: skipped (no job chosen)");
+    add(await timedCheck("PDF service", async () => { const b = await renderPdf("<p>test</p>"); return `${b.length} bytes`; }));
+  }
+
+  add(); add("== RECENT ACTIVITY (oldest first) ==");
+  if (!diagLog.length) add("Nothing recorded yet.");
+  for (const e of diagLog) add(`${hms(e.t)}  [${e.k}] ${e.m}`);
+  add(); add("End of report. It does not contain your key or the text of any email (the open email's subject and attachment names are included).");
+  return safe(L.join("\r\n"));
+}
+$("diagRun").addEventListener("click", async () => {
+  $("diagRun").disabled = true; $("diagBtns").hidden = true;
+  $("diagNote").className = "busy"; $("diagNote").textContent = "Collecting information. This takes a few seconds…";
+  try {
+    diagText = await buildReport();
+    $("diagOut").value = diagText;
+    $("diagNote").className = "ok"; $("diagNote").textContent = `Report ready (${diagText.split("\n").length} lines). Choose what to do with it:`;
+    $("diagBtns").hidden = false;
+  } catch (e) { $("diagNote").className = "err"; $("diagNote").textContent = `Could not collect the information: ${describeError(e)}`; }
+  $("diagRun").disabled = false;
+});
+$("diagEmail").addEventListener("click", () => {
+  try {
+    let body = diagText;
+    const LIMIT = 22000; // Outlook accepts about 32,000 characters in a new message
+    if (body.length > LIMIT) body = body.slice(0, 4000) + "\r\n...(middle of the report left out to fit in an email)...\r\n" + body.slice(-(LIMIT - 4000));
+    Office.context.mailbox.displayNewMessageForm({
+      toRecipients: [SUPPORT_EMAIL],
+      subject: `Wunderbuild add-in troubleshooting report (v${APP_VERSION})`,
+      htmlBody: `<p>Troubleshooting report from the Send to Wunderbuild add-in. Please add a line below about what you were doing and what went wrong.</p><pre style="font:12px Consolas,monospace">${escHtml(body)}</pre>`,
+    });
+    $("diagNote").className = "ok"; $("diagNote").textContent = "A new email has opened with the report in it. Add a note about what went wrong, then press Send.";
+  } catch (e) { $("diagNote").className = "err"; $("diagNote").textContent = `Could not open an email: ${describeError(e)}. Use Copy instead and paste the report into an email.`; }
+});
+$("diagSave").addEventListener("click", () => {
+  try {
+    const d = new Date(), p = (n) => String(n).padStart(2, "0");
+    const name = `Wunderbuild-troubleshooting-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.txt`;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([diagText], { type: "text/plain" })); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    $("diagNote").className = "ok"; $("diagNote").textContent = `Saving ${name}. If nothing downloads, use Copy instead.`;
+  } catch (e) { $("diagNote").className = "err"; $("diagNote").textContent = `Could not save a file: ${describeError(e)}. Use Copy instead.`; }
+});
+$("diagCopy").addEventListener("click", async () => {
+  let ok = false;
+  try { await navigator.clipboard.writeText(diagText); ok = true; } catch { /* try the older way */ }
+  if (!ok) { try { $("diagOut").hidden = false; $("diagOut").select(); ok = document.execCommand("copy"); } catch { /* ignore */ } }
+  $("diagNote").className = ok ? "ok" : "err";
+  $("diagNote").textContent = ok ? "Copied. Paste it into an email." : "Could not copy automatically. The report is shown below: select it all and copy it.";
+  if (!ok) $("diagOut").hidden = false;
+});
 
 /* ---------- init ---------- */
 $("name").addEventListener("input", () => { nameEdited = true; refreshSend(); });
