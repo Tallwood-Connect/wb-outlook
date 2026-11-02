@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.60"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.61"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -823,7 +823,9 @@ async function findExisting(forJob, destFolderId, id) {
     const [docs, outlookId] = await Promise.all([listDocs(forJob._id, f), findOutlookFolderId(f, forJob._id)]);
     return [...docs, ...(outlookId ? await listDocs(forJob._id, outlookId) : [])];
   }));
-  return lists.flat().filter((d) => (d.name || "").includes(`[${id}]`));
+  const all = lists.flat(), hits = all.filter((d) => (d.name || "").includes(`[${id}]`));
+  hits.all = all; // every file seen, used to keep new PDF names from clashing
+  return hits;
 }
 
 let dupRun = 0, justSaved = null; // justSaved = id of the job this email was just saved to
@@ -839,7 +841,7 @@ async function checkDuplicate() {
     const found = await findExisting(forJob, $("folder").value, await emailId(item));
     if (run !== dupRun || job !== forJob) return; // something changed meanwhile
     note.className = ""; note.textContent = "";
-    let both = found.some(isPdfDoc) && found.some(isEmlDoc);
+    let both = found.some(isEmlDoc); // the .eml carries the reference; its PDF was saved with it
     if (found.length) {
       dupFound = both; // received emails show a green "Sent to Wunderbuild" button instead of a message
       if (both) {
@@ -1051,7 +1053,7 @@ function sendDraft() {
 function markSaved(snap) { // lets the send-time prompt know this draft has been saved
   return new Promise((resolve) => {
     if (!snap.compose || !snap.props) return resolve();
-    try { snap.props.set("wbSaved", true); snap.props.saveAsync(() => resolve()); } catch { resolve(); }
+    try { snap.props.set("wbSaved", true); if (snap.pdfRef) snap.props.set("wbPdf", snap.pdfRef); snap.props.saveAsync(() => resolve()); } catch { resolve(); }
   });
 }
 
@@ -1117,9 +1119,17 @@ $("send").addEventListener("click", async () => {
     }
     const oldPdf = existing.filter(isPdfDoc), oldEml = existing.filter(isEmlDoc);
     const replace = snap.compose; // a draft is saved afresh each time, so the saved copy always matches what is sent
-    const needPdf = replace || !oldPdf.length, needEml = replace || !oldEml.length; // a received email only fills in what is missing
+    const needPdf = replace || !(oldPdf.length || oldEml.length), needEml = replace || !oldEml.length; // the PDF has a clean name, so a saved .eml means its PDF is saved too; // a received email only fills in what is missing
     const duplicate = !needPdf && !needEml;
-    const fileBase = `${baseName} [${id}]`;
+    const fileBase = `${baseName} [${id}]`; // only the .eml (in "Outlook Files") carries the reference; the PDF keeps a clean name
+    // an earlier PDF of this same draft (its Wunderbuild id is kept on the draft) is replaced, so it does not count as a name clash
+    let priorPdf = null;
+    if (replace && snap.props) { try { const v = String(snap.props.get("wbPdf") || ""); const [j, d] = v.split(":"); if (j === jobAtSend._id && d) priorPdf = d; } catch { /* none */ } }
+    let nameDocs = existing.all;
+    if (needPdf && !nameDocs) { try { nameDocs = await listDocs(jobAtSend._id, folderId); } catch { nameDocs = []; } }
+    const taken = new Set((nameDocs || []).filter((d) => d._id !== priorPdf).map((d) => String(d.name || "").toLowerCase()));
+    let pdfName = `${baseName}.pdf`;
+    for (let n = 2; taken.has(pdfName.toLowerCase()) && n < 100; n++) pdfName = `${baseName} (${n}).pdf`;
 
     let pdf = null;
     if (useFmt && needPdf) {
@@ -1129,11 +1139,11 @@ $("send").addEventListener("click", async () => {
         if (!pdf) pdf = await renderPdf(buildEmailHtml({ subject, meta, bodyHtml, cid: buildCidMap(bodyHtml, inl) }));
       } catch (e) { problems.push(`formatted PDF unavailable (${e.message}), so a basic text PDF was saved instead`); }
     }
-    let newPdfOk = false, newEmlOk = false, emlDoc = null;
+    let newPdfOk = false, newEmlOk = false, emlDoc = null, pdfDoc = null;
     // The PDF and the original email are saved together; a failed PDF stops everything, a failed original email is only reported.
     const pdfJob = needPdf ? (async () => {
       if (!pdf) pdf = emailToPdf({ subject, meta, body: bodyText });
-      await uploadFile(`${fileBase}.pdf`, "application/pdf", pdf, folderId, jobAtSend._id);
+      pdfDoc = await uploadFile(pdfName, "application/pdf", pdf, folderId, jobAtSend._id);
       newPdfOk = true;
     })() : Promise.resolve();
     const emlJob = needEml ? (async () => {
@@ -1149,10 +1159,16 @@ $("send").addEventListener("click", async () => {
       if (emlDoc) { try { await api(`/documents/job/${jobAtSend._id}/${emlDoc._id}`, { method: "DELETE" }); } catch { /* best effort */ } }
       throw pdfDone.reason;
     }
+    if (newPdfOk && needEml && !newEmlOk) { // the PDF has no reference of its own, so without the .eml a retry would save it twice: take it back
+      if (pdfDoc) { try { await api(`/documents/job/${jobAtSend._id}/${pdfDoc._id}`, { method: "DELETE" }); } catch { /* best effort */ } }
+      throw new Error(`Nothing was saved because the original email could not be filed (${problems[problems.length - 1] || "unknown problem"}). Please try again.`);
+    }
     if (replace) { // the new copies are in, so the earlier copies of this draft can go
       try {
-        for (const d of newPdfOk ? oldPdf : []) await api(`/documents/job/${jobAtSend._id}/${d._id}`, { method: "DELETE" });
-        for (const d of newEmlOk ? oldEml : []) await api(`/documents/job/${jobAtSend._id}/${d._id}`, { method: "DELETE" });
+        const gone = (e) => { if (!/404/.test(String(e && e.message))) throw e; }; // already removed by hand is fine
+        for (const d of newPdfOk ? oldPdf : []) await api(`/documents/job/${jobAtSend._id}/${d._id}`, { method: "DELETE" }).catch(gone);
+        if (newPdfOk && priorPdf && !oldPdf.some((d) => d._id === priorPdf)) await api(`/documents/job/${jobAtSend._id}/${priorPdf}`, { method: "DELETE" }).catch(gone);
+        for (const d of newEmlOk ? oldEml : []) await api(`/documents/job/${jobAtSend._id}/${d._id}`, { method: "DELETE" }).catch(gone);
       } catch (e) { problems.push(`the earlier saved copy could not be removed (${e.message})`); }
     }
 
@@ -1178,6 +1194,7 @@ $("send").addEventListener("click", async () => {
     if (snap.compose && snap.wbId) store.set(sentKey(snap.subject, snap.to), JSON.stringify({ at: Date.now(), id: snap.wbId })); // so the sent copy is recognised as saved
     saveConvRecord(convId, jobAtSend);
     if (snap.compose) saveReplyRecord(convId, jobAtSend);
+    if (snap.compose && pdfDoc) snap.pdfRef = `${jobAtSend._id}:${pdfDoc._id}`; // so the next save of this draft can replace this PDF
     await markSaved(snap);
 
     let msg;
@@ -1375,6 +1392,14 @@ async function buildReport() {
     add(await timedCheck("Wunderbuild job list", async () => { const d = await api("/jobs?page=1&limit=1"); return `${(d.pagination && d.pagination.totalCount) || (d.result || []).length} job(s) reported`; }));
     if (job) add(await timedCheck("Folders of the chosen job", async () => { const d = await api(`/documents/job/${job._id}/folders`); return `${(d.subFolders || []).length} top-level folders`; }));
     else add("Folders of the chosen job: skipped (no job chosen)");
+    if (job) add(await timedCheck("Document fields Wunderbuild returns (names only, read-only check)", async () => {
+      const d = await api(`/documents/job/${job._id}?page=1&limit=3`);
+      const docs = d.result || [];
+      if (!docs.length) return "no documents in the top level of this job to inspect (choose a job that has files)";
+      const keys = [...new Set(docs.flatMap((x) => Object.keys(x || {})))].sort();
+      const extra = keys.filter((k) => !["_id", "name", "type", "size", "isDeleted", "folderId"].includes(k));
+      return `fields: ${keys.join(", ")} | other than the basics: ${extra.join(", ") || "none"}`;
+    }));
     add(await timedCheck("PDF service", async () => { const b = await renderPdf("<p>test</p>"); return `${b.length} bytes`; }));
   }
 
