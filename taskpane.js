@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.59"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.60"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -46,6 +46,7 @@ function docSavedAt(d) {
   const m = /^[0-9a-f]{24}$/i.exec(d._id || "");
   return m ? new Date(parseInt(d._id.slice(0, 8), 16) * 1000) : null;
 }
+const canSendFromAddin = () => { const it = Office.context.mailbox.item; return !!it && typeof it.sendAsync === "function"; }; // classic Outlook cannot
 function refreshSend() {
   const ready = !!(job && $("name").value.trim()) && !foldersFailed && !foldersPending;
   const compose = isCompose();
@@ -54,7 +55,7 @@ function refreshSend() {
   if (dupFound && !compose && !(attOn && ready)) { btn.textContent = "Sent to Wunderbuild"; btn.className = "done"; btn.disabled = true; }
   else {
     btn.className = "";
-    btn.textContent = dupFound && !compose ? "Save attachments" : compose ? "Save and send" : "Send to Wunderbuild";
+    btn.textContent = dupFound && !compose ? "Save attachments" : compose ? (canSendFromAddin() ? "Save and send" : "Save to Wunderbuild") : "Send to Wunderbuild";
     btn.disabled = !ready || sending; // not while an attachment is being added or a save is running
   }
   $("wbAttachBtn").disabled = !job || sending;
@@ -170,7 +171,8 @@ async function loadDraftSnapshot() { // an email being written: details are read
   const me = Office.context.mailbox.userProfile;
   return { compose: true, subject: subject || "", from: from || (me ? { displayName: me.displayName, emailAddress: me.emailAddress } : null),
     to: to || [], cc: cc || [], bcc: bcc || [], date: new Date(), attachments: atts || [],
-    conversationId: it.conversationId || undefined, internetMessageId: undefined, wbId, props };
+    conversationId: it.conversationId || undefined, internetMessageId: undefined, wbId, props,
+    savedBefore: !!(props && props.get("wbSaved")) }; // false for a brand new draft: nothing of it can be in Wunderbuild yet
 }
 
 // Runs whenever an email is opened: fills in the job from an earlier email in the same
@@ -829,7 +831,9 @@ function resetDup() { dupRun++; dupFound = false; repliedOnly = false; savedAt =
 async function checkDuplicate() {
   resetDup(); refreshSend();
   const run = dupRun, forJob = job, item = cur, note = $("dupNote");
-  if (!forJob || !item || justSaved === forJob._id) return; // no "already saved" note straight after saving it
+  if (!forJob || !item || justSaved === forJob._id) return;
+  if (isCompose() && !item.savedBefore) return; // a brand new email cannot already be saved, so nothing to look for
+  // no "already saved" note straight after saving it
   note.className = "busy"; note.textContent = "Checking whether this email is already saved…";
   try {
     const found = await findExisting(forJob, $("folder").value, await emailId(item));
@@ -1033,7 +1037,7 @@ async function buildDraftEml(snap, bodyHtml, bodyText, readAtt) {
     else skipped++;
   }
   return { bytes: buildEml({ id: snap.wbId, from: snap.from, to: snap.to, cc: snap.cc, bcc: snap.bcc, subject: snap.subject,
-    date: new Date(), bodyHtml, bodyText, attachments: parts }), skipped };
+    date: snap.compose ? new Date() : snap.date, bodyHtml, bodyText, attachments: parts }), skipped };
 }
 // Sends the draft that was just saved. Only available in newer Outlook (Mailbox 1.15 and later).
 function sendDraft() {
@@ -1084,14 +1088,20 @@ $("send").addEventListener("click", async () => {
     // pictures can be listed by Outlook as ordinary attachments while the email shows them inline (common in replies)
     const inlineAtts = snap.attachments.filter((a) => attType(a).startsWith("image/") && (a.size || 0) < 5 * 1024 * 1024 && (a.isInline || cidNames.has((a.name || "").toLowerCase())));
     const inlineReads = useFmt ? inlineAtts.map((a) => readAtt(a).then((r) => (r.f ? { a, f: r.f } : null))) : [];
-    const [bodyText, bodyHtml, emlB64, ...rest] = await Promise.all([getBodyText(), htmlNow, snap.compose ? null : getEml(), ...reads, ...inlineReads]);
+    const [bodyText, bodyHtml, emlB64, ...rest] = await Promise.all([getBodyText(), htmlNow, snap.compose ? null : getEml().catch(() => null), ...reads, ...inlineReads]);
     const got = rest.slice(0, reads.length), inl = rest.slice(reads.length);
     let eml;
     if (snap.compose) {
       const built = await buildDraftEml(snap, bodyHtml, bodyText, readAtt);
       eml = built.bytes;
       if (built.skipped) problems.push(`${built.skipped} attachment${built.skipped === 1 ? "" : "s"} could not be included in the rebuilt email file (cloud links)`);
-    } else eml = b64ToBytes(emlB64);
+    } else if (emlB64) eml = b64ToBytes(emlB64);
+    else { // this Outlook cannot export the email (e.g. classic Outlook): rebuild the .eml from its details
+      const built = await buildDraftEml(Object.assign({}, snap, { wbId: await idPromise }), bodyHtml, bodyText, readAtt);
+      eml = built.bytes;
+      diag("save", "this Outlook cannot export the email; the .eml was rebuilt from its text and attachments");
+      if (built.skipped) problems.push(`${built.skipped} attachment${built.skipped === 1 ? "" : "s"} could not be included in the rebuilt email file`);
+    }
 
     // Check, right now, whether this email is already in the job (e.g. a colleague saved it first).
     const id = await idPromise;
@@ -1101,8 +1111,10 @@ $("send").addEventListener("click", async () => {
       : Promise.resolve(null);
     renderP.catch(() => {}); // a failure is reported where the result is used
     let existing = [];
-    try { setStatus("Checking for an existing copy…", "busy"); existing = await findExisting(jobAtSend, folderId, id); }
-    catch (e) { problems.push(`could not check for an existing copy (${e.message})`); }
+    if (!snap.compose || snap.savedBefore) { // a brand new email has no earlier copy, so the check is skipped
+      try { setStatus("Checking for an existing copy…", "busy"); existing = await findExisting(jobAtSend, folderId, id); }
+      catch (e) { problems.push(`could not check for an existing copy (${e.message})`); }
+    }
     const oldPdf = existing.filter(isPdfDoc), oldEml = existing.filter(isEmlDoc);
     const replace = snap.compose; // a draft is saved afresh each time, so the saved copy always matches what is sent
     const needPdf = replace || !oldPdf.length, needEml = replace || !oldEml.length; // a received email only fills in what is missing
@@ -1189,7 +1201,7 @@ $("send").addEventListener("click", async () => {
       setStatus(msg + " Sending…", "busy");
       try { await sendDraft(); msg += " Email sent."; }
       catch (e) {
-        msg += e.message === "unsupported" ? " This version of Outlook cannot send from the add-in, so click Send yourself."
+        msg += e.message === "unsupported" ? " Saved. This version of Outlook cannot send from the add-in, so click Outlook's Send button now."
           : ` The email could not be sent automatically (${e.message}). Click Send yourself.`;
         problems.push("not sent");
       }
@@ -1404,7 +1416,7 @@ $("diagSave").addEventListener("click", () => {
     a.href = URL.createObjectURL(new Blob([diagText], { type: "text/plain" })); a.download = name;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-    $("diagNote").className = "ok"; $("diagNote").textContent = `Saving ${name}. If nothing downloads, use Copy instead.`;
+    $("diagNote").className = "ok"; $("diagOut").hidden = false; $("diagNote").textContent = `Saving ${name}. If nothing downloads (some Outlook versions block it), press Copy, or select the report shown below and copy it.`;
   } catch (e) { $("diagNote").className = "err"; $("diagNote").textContent = `Could not save a file: ${describeError(e)}. Use Copy instead.`; }
 });
 $("diagCopy").addEventListener("click", async () => {

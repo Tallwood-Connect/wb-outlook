@@ -92,7 +92,16 @@
 </style>
 </head>
 <body>
-<h1>Send to Wunderbuild <span id="ver" data-v="1.59">v1.48</span></h1>
+<div id="oldOutlook" hidden style="padding:14px;background:#FDECEA;color:#7A1F17;border:1px solid #E8B4AE;border-radius:8px;margin:12px;font:14px/1.4 sans-serif"><b>This version of Outlook is too old for this add-in.</b><br>It needs Microsoft 365 Outlook (or the new Outlook). Please update Outlook or ask Jason.</div>
+<script>
+(function () { // runs even in very old Outlook engines: plain old JavaScript only
+  var ok = true;
+  try { ok = typeof Promise !== "undefined" && typeof fetch !== "undefined" && typeof Uint8Array !== "undefined"; new Function("return async function () {}; "); new Function("var a = {b: 1}; return {...a};"); } catch (e) { ok = false; }
+  if (!ok) { document.getElementById("oldOutlook").hidden = false; window.__wbTooOld = true; }
+})();
+</script>
+
+<h1>Send to Wunderbuild <span id="ver" data-v="1.60">v1.48</span></h1>
 
 <details id="settings">
   <summary>API settings</summary>
@@ -185,8 +194,8 @@
   <textarea id="diagOut" readonly rows="8" hidden aria-label="Troubleshooting report"></textarea>
 </details>
 
-<script src="pdf.js?v=1.59"></script>
-<script src="eml.js?v=1.59"></script>
-<script src="taskpane.js?v=1.59"></script>
+<script src="pdf.js?v=1.60"></script>
+<script src="eml.js?v=1.60"></script>
+<script src="taskpane.js?v=1.60"></script>
 </body>
 </html>
