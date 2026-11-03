@@ -11,9 +11,11 @@
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
   /* ---- the subject that identifies a conversation: no Re:/Fwd:, no job details added by the add-in ---- */
+  // Job details at the start of a subject, in any of the layouts staff use: "J-01041 - Name (address) - ", "J-01041 Name - ", "J-01041 - Name"
+  const JOB_LEAD = /^J-?\d{4,}(?:\s*[-\u2013]\s*|\s+)((?:(?!\s[-\u2013]\s).)*?)(?:\s+[-\u2013]\s+|\s*$)/i;
   function normSubject(subject) {
     let t = String(subject || "").replace(/^\s*((re|fw|fwd|aw|sv|vs)\s*:\s*)+/i, "");
-    t = t.replace(/^J-\d{5,}(?: - [^()]*?)?(?: \([^()]*\))?\s*-\s*/, "");
+    t = t.replace(JOB_LEAD, "");
     t = t.replace(/^\s*((re|fw|fwd|aw|sv|vs)\s*:\s*)+/i, "");
     return t.replace(/\s+/g, " ").trim();
   }
@@ -105,7 +107,8 @@
     const P = parse || ((h) => new DOMParser().parseFromString(h || "", "text/html"));
     const doc = P(html);
     const fullText = toText(doc.body);
-    const out = (o) => Object.assign({ full: fullText, trimmed: false, quote: null, quoteCount: 0, quoteRatio: 0, added: 0 }, o);
+    const headStyles = Array.from(doc.querySelectorAll("head style")).map((e) => e.outerHTML).join(""); // an email's styles may sit outside its body
+    const out = (o) => { const r = Object.assign({ full: fullText, trimmed: false, quote: null, quoteCount: 0, quoteRatio: 0, added: 0 }, o); if (headStyles && r.html != null) r.html = headStyles + r.html; return r; };
     const cut = findCut(doc);
     if (!cut) return out({ html: doc.body.innerHTML });
     const removed = [];
@@ -141,23 +144,46 @@
   }
 
   /* ---- clean an email's HTML before it goes into the PDF page ---- */
+  // An email's own <style> rules are kept, but fenced in: every rule only applies inside that email's own block (.scope),
+  // so one email cannot restyle another or the page. @page, @font-face, @import and animations are dropped.
+  const cleanDecl = (d) => d.replace(/position\s*:\s*(fixed|absolute|sticky)/gi, "position:static").replace(/expression\s*\(/gi, "x(").replace(/behavior\s*:[^;]*;?/gi, "").replace(/@import/gi, "").replace(/-moz-binding[^;]*;?/gi, "");
+  function scopeSel(sel, scope) { const t = sel.replace(/^(html|body)\b/i, "").trim(); return t ? "." + scope + " " + t : "." + scope; }
+  function scopeCss(css, scope) {
+    css = String(css || "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/<!--|-->/g, "");
+    let out = "", i = 0;
+    while (i < css.length) {
+      const open = css.indexOf("{", i); if (open < 0) break;
+      const head = css.slice(i, open).trim().replace(/^[\s;]+/, "");
+      let depth = 1, j = open + 1;
+      while (j < css.length && depth) { const c = css[j]; if (c === "{") depth++; else if (c === "}") depth--; j++; }
+      const body = css.slice(open + 1, j - 1);
+      if (head.charAt(0) === "@") { if (/^@media/i.test(head)) out += head + "{" + scopeCss(body, scope) + "}"; }
+      else if (head) out += head.split(",").map((x) => scopeSel(x.trim(), scope)).join(",") + "{" + cleanDecl(body) + "}";
+      i = j;
+    }
+    return out;
+  }
   function sanitize(html, opts, parse) {
-    const keepStyle = !!(opts && opts.keepStyle);
+    const o = opts || {}, scope = o.scope ? String(o.scope).replace(/[^A-Za-z0-9_-]/g, "") : "";
     const P = parse || ((h) => new DOMParser().parseFromString(h || "", "text/html"));
     const doc = P(html);
-    const drop = "script,meta,link,base,iframe,frame,frameset,object,embed,applet,form,noscript,title,template" + (keepStyle ? "" : ",style");
+    const drop = "script,meta,link,base,iframe,frame,frameset,object,embed,applet,form,noscript,title,template" + (o.keepStyle || scope ? "" : ",style");
     for (const el of Array.from(doc.querySelectorAll(drop))) el.parentNode && el.parentNode.removeChild(el);
-    if (keepStyle) for (const el of Array.from(doc.querySelectorAll("style"))) el.textContent = (el.textContent || "").replace(/@import[^;]*;?/gi, "").replace(/expression\s*\(/gi, "x(");
+    for (const el of Array.from(doc.querySelectorAll("style"))) {
+      if (scope) el.textContent = scopeCss(el.textContent, scope);
+      else el.textContent = (el.textContent || "").replace(/@import[^;]*;?/gi, "").replace(/expression\s*\(/gi, "x(");
+    }
     const bad = /^\s*(javascript|vbscript|data\s*:\s*text\/html)/i;
-    for (const el of Array.from(doc.body.querySelectorAll("*"))) {
+    for (const el of Array.from(doc.querySelectorAll("*"))) {
       for (const at of Array.from(el.attributes)) {
         const n = at.name.toLowerCase(), v = at.value || "";
         if (n.indexOf("on") === 0 || n === "srcset" || n === "formaction" || n === "action" || n === "ping") el.removeAttribute(at.name);
         else if ((n === "href" || n === "src" || n === "background" || n === "xlink:href") && bad.test(v.replace(/[\s\u0000-\u001f]+/g, ""))) el.removeAttribute(at.name);
-        else if (n === "style") el.setAttribute("style", v.replace(/position\s*:\s*(fixed|absolute|sticky)/gi, "position:static").replace(/expression\s*\(/gi, "x(").replace(/@import/gi, ""));
+        else if (n === "style") el.setAttribute("style", cleanDecl(v));
       }
     }
-    return doc.body.innerHTML;
+    const inner = (scope || o.keepStyle ? doc.head.innerHTML.replace(/<(?!\/?style\b)[^>]*>/gi, "") : "") + doc.body.innerHTML; // styles that sat in the head come along
+    return scope ? `<div class="${scope}">${inner}</div>` : inner;
   }
 
   /* ---- who answered whom ---- */
@@ -197,7 +223,7 @@
       `<div style="white-space:nowrap"><span style="color:${colour};font-weight:bold">${dir}</span> · ${esc(fmtWhen(e.at))}</div></div>` +
       line("To", e.to) + line("Cc", e.cc) + (e.atts && e.atts.length ? line("Attachments", e.atts.join(", ")) : "") +
       (link ? `<div><a href="${esc(link)}" style="color:#1A5FB4">Open the original email file in Wunderbuild${e.emlName ? " (" + esc(e.emlName) + ")" : ""}</a></div>` : "") + `</div>` +
-      `<div style="font:13px/1.45 Arial,Helvetica,sans-serif;padding:8px 4px 0 16px">${e.html}</div></section>`;
+      `<div style="font:13px/1.45 Arial,Helvetica,sans-serif;padding:8px 4px 0 16px" class="eb">${e.html}</div></section>`;
   }
   /* A straight run of replies stays at one level. Only where a message was answered more than once does each
      answer get its own indented branch, with a line down the side. */
@@ -220,7 +246,11 @@
     const branched = [...kids.values()].some((k) => k.length > 1);
     return `<!doctype html><html><head><meta charset="utf-8">` +
       `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: https:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">` +
-      `<style>@page{size:A4;margin:16mm 14mm}img{max-width:100%!important;height:auto!important}</style></head>` +
+      `<style>@page{size:A4;margin:16mm 14mm}` +
+      `.eb img{max-width:100%!important;height:auto!important}` + // pictures keep their proportions
+      `.eb *{break-inside:auto!important;page-break-inside:auto!important;min-height:0!important}` + // long emails flow across pages without gaps
+      `.eb div:empty,.eb p:empty{display:none!important}` +
+      `.eb p[class*=MsoNormal],.eb li[class*=MsoNormal]{margin:0}</style></head>` +
       `<body style="margin:0"><div style="font:13px Arial,Helvetica,sans-serif;border-bottom:2px solid #333;padding-bottom:8px;margin-bottom:16px">` +
       `<div style="font-size:11px;letter-spacing:1px;color:#777;text-transform:uppercase">Email conversation</div>` +
       `<div style="font-size:19px;font-weight:bold;margin:2px 0 4px">${esc(meta.subject || "(No subject)")}</div>` +

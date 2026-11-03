@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.63"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.64"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const missingEls = {}; // a page kept from an older version may lack newer controls: they get a harmless stand-in instead of crashing the panel
 const $ = (id) => document.getElementById(id) || (missingEls[id] || (missingEls[id] = document.createElement("div")));
@@ -216,14 +216,19 @@ function renderJobList(jobs) {
 /* ---------- job details in the subject (emails being written only) ---------- */
 let appliedPrefix = ""; // the text this add-in last put at the start of the subject
 function subjectPrefixOn() { return isCompose() && $("subjPrefix").checked; }
-function buildPrefix(j) { // e.g. "J-01067 - Smith (#12 Oak Street, PERTH)"
+function buildPrefix(j) { // e.g. "J-01067 - Smith"
   const num = fullJobNo(j);
   const name = String(j.name || "").replace(/\s*[-–]\s*D\s*$/i, "").trim(); // drops a trailing "- D"
-  let street = String(j.address || "").trim();
-  if (/^\d/.test(street)) street = "#" + street; // street number gets a #; "Lot 5" and "L5" do not
-  const place = [street, String(j.city || "").trim().toUpperCase()].filter(Boolean).join(", ");
-  return [num, name].filter(Boolean).join(" - ") + (place ? ` (${place})` : "");
+  return [num, name].filter(Boolean).join(" - ");
 }
+// Does the subject (after any Re:/Fwd:) already start with this job's number, in any layout?
+// "J-01041 - Hann - …", "J-01041 Hann - …" and older ones with an address all count, so nothing is ever added twice.
+function hasJobPrefix(subject, j) {
+  const want = j && j.jobNumber ? parseInt(String(j.jobNumber).replace(/\D/g, ""), 10) : NaN;
+  const m = /^J-?\s?0*(\d+)(?!\d)/i.exec(String(subject || "").replace(LEAD_RE, "").trim());
+  return !!m && !isNaN(want) && parseInt(m[1], 10) === want;
+}
+const JOB_LEAD = /^J-?\d{4,}(?:\s*[-–]\s*|\s+)((?:(?!\s[-–]\s).)*?)(?:\s+[-–]\s+|\s*$)/i; // keep in step with JOB_LEAD in thread.js
 const LEAD_RE = /^(\s*(?:(?:re|fw|fwd|aw|sv|vs)\s*:\s*)+)/i; // "Re: ", "Fwd: " etc. put in front by replying or forwarding
 function splitSubject(subject) { // { lead: "Re: ", rest: the subject without that lead or the job details }
   let t = subject || "", lead = "";
@@ -231,7 +236,7 @@ function splitSubject(subject) { // { lead: "Re: ", rest: the subject without th
   if (l) { lead = l[1]; t = t.slice(lead.length); }
   if (appliedPrefix && t.startsWith(appliedPrefix)) return { lead, rest: t.slice(appliedPrefix.length).replace(/^[\s:\-–]+/, "") };
   // also recognise details added earlier (e.g. before the panel was reopened, or in an email being replied to or forwarded): "J-01067 - Name (#12 Street, SUBURB) - "
-  const m = /^J-\d{5,}(?: - [^()]*?)?(?: \([^()]*\))?(?:\s*-\s*|\s*$)/.exec(t);
+  const m = JOB_LEAD.exec(t); // job details in front, whatever layout and with or without an address
   return { lead, rest: m ? t.slice(m[0].length) : t };
 }
 function stripPrefix(subject) { const p = splitSubject(subject); return p.lead + p.rest; } // keeps any "Re: " in front
@@ -244,7 +249,8 @@ async function applySubjectPrefix(remove) {
     const it = Office.context.mailbox.item;
     const now = await asyncVal((cb) => it.subject.getAsync(cb));
     if (run !== subjRun || now == null) return;
-    const { lead, rest } = splitSubject(now); // a "Re: " / "Fwd: " in front is kept; job details already present are replaced, never doubled
+    if (!remove && job && hasJobPrefix(now, job)) { appliedPrefix = ""; return; } // this job's details are already there (e.g. replying to an email that has them): leave it exactly as it is
+    const { lead, rest } = splitSubject(now); // a "Re: " / "Fwd: " in front is kept; another job's details are replaced, never doubled
     const prefix = remove || !job ? "" : buildPrefix(job);
     const next = prefix ? `${lead}${prefix} - ${rest}` : lead + rest; // ends "- " ready for the person to type
     appliedPrefix = prefix;
@@ -533,6 +539,24 @@ function bytesToB64(bytes) {
 }
 const escHtml = (t) => String(t == null ? "" : t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
+// Very large pictures are scaled down (longest side 1600 px, JPEG) so the PDF stays a sensible size; the saved attachments themselves are never changed.
+async function shrinkImage(f) {
+  try {
+    if (!/^image\/(png|jpe?g|bmp|webp)$/i.test(f.type) || f.bytes.length < 400 * 1024 || typeof Image === "undefined" || typeof URL === "undefined" || !URL.createObjectURL) return f;
+    const url = URL.createObjectURL(new Blob([f.bytes], { type: f.type }));
+    const img = await new Promise((ok, no) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => no(new Error("unreadable picture")); i.src = url; });
+    URL.revokeObjectURL(url);
+    const w0 = img.naturalWidth || img.width, h0 = img.naturalHeight || img.height;
+    if (!w0 || !h0) return f;
+    const k = Math.min(1, 1600 / Math.max(w0, h0)), c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(w0 * k)); c.height = Math.max(1, Math.round(h0 * k));
+    const cx = c.getContext("2d"); cx.fillStyle = "#fff"; cx.fillRect(0, 0, c.width, c.height); cx.drawImage(img, 0, 0, c.width, c.height);
+    const blob = await new Promise((ok) => c.toBlob(ok, "image/jpeg", 0.78));
+    if (!blob) return f;
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    return bytes.length < f.bytes.length ? Object.assign({}, f, { type: "image/jpeg", bytes }) : f;
+  } catch { return f; }
+}
 // Matches each cid: reference in the email to an inline image. Outlook does not give a draft's images their
 // content IDs, so images are matched by name first (the id is usually "name.png@code"), then in order of appearance
 // (several pasted images are all called "image.png").
@@ -548,6 +572,7 @@ function buildCidMap(html, inl) {
   }
   for (const id of left) { const r = items.find((x) => !used.has(x)); if (r) { used.add(r); map.set(id, uri(r)); } }
   for (const r of items) { const k = (r.a.name || "").toLowerCase(); if (k && !map.has(k)) map.set(k, uri(r)); }
+  for (const r of items) if (r.a.id) map.set("id:" + r.a.id, uri(r)); // Outlook on the web names a picture's attachment inside the picture tag
   return map;
 }
 
@@ -811,12 +836,27 @@ $("brGo").addEventListener("click", attachBrowsed);
 function prepBody(bodyHtml, cid, noStyle) { // the email's own HTML made ready for a PDF
   let body = String(bodyHtml || "").replace(/<script[\s\S]*?<\/script>/gi, "");
   body = body.replace(/cid:([^"'\s)>]+)/gi, (m, id) => (cid && (cid.get(id.toLowerCase()) || cid.get(id.split("@")[0].toLowerCase()))) || m);
-  // Pictures that could not be found would leave an empty gap or a broken icon, so they are replaced by a short note.
-  body = body.replace(/<img\b[^>]*\bsrc\s*=\s*["']?cid:[^>]*>/gi, '<span style="color:#888;font-size:11px">[picture not included]</span>');
+  // Outlook on the web puts a 1-pixel placeholder in src and keeps the real picture in originalsrc (or names its attachment in data-custom).
+  // Each picture is given its real source; one that cannot be found becomes a short note, because a placeholder stretched to the
+  // picture's size would leave a large blank gap.
+  const NOTE = '<span style="color:#888;font-size:11px">[picture not included]</span>';
+  const attr = (tag, name) => { const m = new RegExp("\\s" + name + "\\s*=\\s*(\"([^\"]*)\"|'([^']*)')", "i").exec(tag); return m ? (m[2] != null ? m[2] : m[3]) : null; };
+  const noAttr = (tag, name) => tag.replace(new RegExp("\\s" + name + "\\s*=\\s*(\"[^\"]*\"|'[^']*')", "ig"), "");
+  body = body.replace(/<img\b[^>]*>/gi, (tag) => {
+    const src = attr(tag, "src") || "", orig = attr(tag, "originalsrc") || "", dc = attr(tag, "data-custom");
+    let use = /^data:image\/(?!gif;base64,[A-Za-z0-9+\/=]{0,200}$)/i.test(src) ? src : ""; // a real picture is already there
+    if (!use && /^data:image\//i.test(orig)) use = orig;
+    if (!use && dc && cid) { let id = dc; try { id = decodeURIComponent(dc); } catch { /* use as is */ } use = cid.get("id:" + id) || cid.get("id:" + dc) || ""; }
+    if (!use && /^https?:/i.test(src)) return tag; // an ordinary web picture
+    if (!use) return NOTE; // placeholder, unresolved cid:, or nothing usable
+    return noAttr(noAttr(noAttr(noAttr(tag, "src"), "originalsrc"), "data-custom"), "srcset").replace(/<img\b/i, `<img src="${use}"`);
+  });
+  // Pictures set as backgrounds or left without a source cannot be shown either
+  body = body.replace(/<img\b[^>]*\bsrc\s*=\s*["']?cid:[^>]*>/gi, NOTE);
   // Runs of empty lines and paragraphs make big blank spaces: keep one.
   body = body.replace(/(<br\s*\/?>\s*){3,}/gi, "<br><br>").replace(/(<p\b[^>]*>(?:\s|&nbsp;|<br\s*\/?>|<o:p>\s*<\/o:p>)*<\/p>\s*){2,}/gi, "<p>&nbsp;</p>");
   // no scripts, forms, frames, event handlers or page-wide settings from the email itself
-  try { if (window.WBThread && window.WBThread.sanitize) body = window.WBThread.sanitize(body, { keepStyle: !noStyle }); } catch { /* the page's own security policy still applies */ }
+  try { if (window.WBThread && window.WBThread.sanitize) body = window.WBThread.sanitize(body, { keepStyle: true }); } catch { /* the page's own security policy still applies */ }
   return body;
 }
 function buildEmailHtml({ subject, meta, bodyHtml, cid }) {
@@ -825,7 +865,7 @@ function buildEmailHtml({ subject, meta, bodyHtml, cid }) {
     `<tr><td style="padding:1px 10px 1px 0;font-weight:bold;vertical-align:top;white-space:nowrap">${escHtml(k)}</td><td style="padding:1px 0">${escHtml(v)}</td></tr>`).join("");
   return `<!doctype html><html><head><meta charset="utf-8">` +
     `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: https:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">` +
-    `<style>img{max-width:100%!important;height:auto!important}*{break-inside:auto!important;page-break-inside:auto!important;min-height:0!important}div:empty,p:empty{display:none!important}</style></head><body style="margin:0">` + // keeps pictures in proportion
+    `<style>img{max-width:100%!important;height:auto!important}*{break-inside:auto!important;page-break-inside:auto!important;min-height:0!important}div:empty,p:empty{display:none!important}p[class*=MsoNormal],li[class*=MsoNormal]{margin:0}</style></head><body style="margin:0">` + // keeps pictures in proportion
     `<div style="font:13px Arial,Helvetica,sans-serif;color:#000;border-bottom:1px solid #999;padding-bottom:10px;margin-bottom:14px">` +
     `<div style="font-size:18px;font-weight:bold;margin-bottom:8px">${escHtml(subject || "(No subject)")}</div><table style="border-collapse:collapse">${rows}</table></div>` +
     `<div>${body}</div></body></html>`;
@@ -907,8 +947,8 @@ async function buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId, d
   const list = (a) => (a || []).map((x) => x.displayName || x.emailAddress).join(", ").slice(0, 300);
   const cid = buildCidMap(bodyHtml, inl);
   const mkEntry = (t) => { // this email as an entry of the record
-    let html = T.sanitize(prepBody(t.html, cid, true), { keepStyle: false }); // the email's own page-wide styles are left out so they cannot change the rest of the PDF
-    if (html.length > 300000) html = html.replace(/<img\b[^>]*\bsrc\s*=\s*["']?data:[^>]*>/gi, '<span style="color:#888;font-size:11px">[picture not included]</span>');
+    let html = T.sanitize(prepBody(t.html, cid, true), { scope: "m" + hash40(id).slice(0, 8) }); // the email's own styles apply only inside its own block, so they cannot change the rest of the PDF
+    if (html.length > 2500000) html = html.replace(/<img\b[^>]*\bsrc\s*=\s*["']?data:[^>]*>/gi, '<span style="color:#888;font-size:11px">[picture not included]</span>');
     return {
       id, at: (snap.date || new Date()).toISOString(),
       dir: snap.compose || (fromAddr && fromAddr.toLowerCase() === me) ? "sent" : "received",
@@ -946,7 +986,7 @@ async function buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId, d
   }
   if (!entry) entry = probe; // a new conversation
   meta = T.addEntry(meta, subject, entry);
-  if (JSON.stringify(meta).length > 3000000) throw new Error("the conversation is too long to keep in one PDF");
+  if (JSON.stringify(meta).length > 9000000) throw new Error("the conversation is too long to keep in one PDF");
   const page = T.pageHtml(meta, { topLink });
   return { bytes: await T.packMeta(await renderPdf(page), meta, L), old, count: meta.entries.length, keys: meta.entries.flatMap(T.threadKeys) };
 }
@@ -1285,10 +1325,12 @@ $("send").addEventListener("click", async () => {
     const htmlNow = (useFmt || snap.compose) ? await getBodyHtml() : "";
     const cidNames = new Set([...htmlNow.matchAll(/cid:([^"'\s)>]+)/gi)].map((m) => m[1].toLowerCase().split("@")[0]));
     // pictures can be listed by Outlook as ordinary attachments while the email shows them inline (common in replies)
-    const inlineAtts = snap.attachments.filter((a) => attType(a).startsWith("image/") && (a.size || 0) < 5 * 1024 * 1024 && (a.isInline || cidNames.has((a.name || "").toLowerCase())));
-    const inlineReads = useFmt ? inlineAtts.map((a) => readAtt(a).then((r) => (r.f ? { a, f: r.f } : null))) : [];
+    const customIds = new Set([...htmlNow.matchAll(/data-custom\s*=\s*["']([^"']+)["']/gi)].map((m) => { try { return decodeURIComponent(m[1]); } catch { return m[1]; } })); // Outlook on the web names a picture's attachment here
+    const inlineAtts = snap.attachments.filter((a) => attType(a).startsWith("image/") && (a.size || 0) < 30 * 1024 * 1024 && (a.isInline || cidNames.has((a.name || "").toLowerCase()) || customIds.has(a.id)));
+    const inlineReads = useFmt ? inlineAtts.map((a) => readAtt(a).then(async (r) => (r.f ? { a, f: await shrinkImage(r.f) } : null))) : [];
     const [bodyText, bodyHtml, emlB64, ...rest] = await Promise.all([getBodyText(), htmlNow, snap.compose ? null : getEml().catch(() => null), ...reads, ...inlineReads]);
     const got = rest.slice(0, reads.length), inl = rest.slice(reads.length);
+    if (useFmt) diag("save", `pictures in the email: ${cidNames.size + customIds.size ? `${Math.max(cidNames.size, customIds.size)} linked to attachments` : "none linked"}; ${snap.attachments.length} attachment(s) listed, ${inlineAtts.length} used as pictures, ${inl.filter(Boolean).length} read`);
     let eml;
     if (snap.compose) {
       const built = await buildDraftEml(snap, bodyHtml, bodyText, readAtt);
@@ -1499,7 +1541,7 @@ function startSubjectWatch() {
       cur.subject = subject;
       if (!nameEdited) { $("name").value = suggestName(); refreshSend(); }
       // Auto subject: put the job details back if they were deleted or damaged by hand
-      if (subjectPrefixOn() && job && !jobAuto && !subject.replace(LEAD_RE, "").startsWith(buildPrefix(job))) { await applySubjectPrefix(); return; }
+      if (subjectPrefixOn() && job && !jobAuto && !hasJobPrefix(subject, job)) { await applySubjectPrefix(); return; }
       // the subject changed: suggest jobs again, unless a job was picked by hand
       if (!job || jobAuto) { if (job) clearJob(); autoMatch(); }
     } catch { /* draft closed or Outlook busy: try again next time */ }
