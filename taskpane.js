@@ -1,7 +1,8 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.62"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.63"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
-const $ = (id) => document.getElementById(id);
+const missingEls = {}; // a page kept from an older version may lack newer controls: they get a harmless stand-in instead of crashing the panel
+const $ = (id) => document.getElementById(id) || (missingEls[id] || (missingEls[id] = document.createElement("div")));
 const store = {
   get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
   set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* storage unavailable */ } },
@@ -58,7 +59,7 @@ function refreshSend() {
     btn.textContent = dupFound && !compose ? "Save attachments" : compose ? (canSendFromAddin() ? "Save and send" : "Save to Wunderbuild") : "Send to Wunderbuild";
     btn.disabled = !ready || sending; // not while an attachment is being added or a save is running
   }
-  $("wbAttachBtn").disabled = !job || sending;
+  $("wbAttachBtn").disabled = !job || sending; $("browseBtn").disabled = !job || sending;
   if (!job) $("wbPick").hidden = true;
   // Already filed: hide the saving settings; "Save Attachments Only" brings back the attachment ones.
   const filed = dupFound && !compose;
@@ -630,7 +631,7 @@ function jobFileIndex(jobId) {
   p.catch(() => { if (indexCache && indexCache.promise === p) indexCache = null; });
   return p;
 }
-function resetPicker() { $("wbPick").hidden = true; $("pickQ").value = ""; $("pickList").textContent = ""; pickDocs = []; pickRun++; indexCache = null; setPickStatus(""); }
+function resetPicker() { closeBrowse(); $("wbPick").hidden = true; $("pickQ").value = ""; $("pickList").textContent = ""; pickDocs = []; pickRun++; indexCache = null; setPickStatus(""); }
 
 function renderPickRows(items) { // items: [{ d, sub }]
   const list = $("pickList");
@@ -711,47 +712,119 @@ function addAttachment(b64, name) {
     it.addFileAttachmentFromBase64Async(b64, name, { isInline: false }, (r) => (r.status === Office.AsyncResultStatus.Succeeded ? resolve() : reject(new Error((r.error && r.error.message) || "Outlook refused"))));
   });
 }
+// Attaches Wunderbuild files to the email being written, one at a time. items: [{ d, ok() }]. Returns { done, failed }.
+async function attachDocs(forJob, items, say) {
+  const failed = []; let done = 0;
+  for (const x of items) {
+    say(`Attaching ${done + failed.length + 1} of ${items.length}: ${x.d.name}…`);
+    try {
+      if ((x.d.size || 0) > MAX_ATTACH) throw new Error(`too large (${sizeText(x.d.size)}; the limit is ${sizeText(MAX_ATTACH)})`);
+      const info = await api(`/documents/job/${forJob._id}/${x.d._id}/download-url`);
+      const bytes = await fetchBytes(info.url);
+      if (bytes.length > MAX_ATTACH) throw new Error(`too large (${sizeText(bytes.length)})`);
+      await addAttachment(bytesToB64(bytes), info.name || x.d.name);
+      done++; x.ok();
+    } catch (e) { failed.push(`${x.d.name}: ${e.message}`); }
+  }
+  return { done, failed };
+}
+const attachSummary = (r) => `${r.done ? `Attached ${r.done} file${r.done === 1 ? "" : "s"} to your email. ` : ""}${r.failed.length ? `Not attached: ${r.failed.join("; ")}` : ""}`;
 async function attachPicked() {
   const forJob = job;
   const rows = [...$("pickList").children];
   const chosen = rows.map((row, i) => ({ row, cb: row.children[0], d: pickDocs[i] })).filter((x) => x.cb.checked && !x.cb.disabled);
   if (!forJob || !chosen.length || sending) return;
   sending = true; lockUI(true); $("pickFolder").disabled = true;
-  const failed = []; let done = 0;
+  let r = { done: 0, failed: [] };
   try {
-    for (const x of chosen) {
-      setPickStatus(`Attaching ${done + failed.length + 1} of ${chosen.length}: ${x.d.name}…`, "busy");
-      try {
-        if ((x.d.size || 0) > MAX_ATTACH) throw new Error(`too large (${sizeText(x.d.size)}; the limit is ${sizeText(MAX_ATTACH)})`);
-        const info = await api(`/documents/job/${forJob._id}/${x.d._id}/download-url`);
-        const bytes = await fetchBytes(info.url);
-        if (bytes.length > MAX_ATTACH) throw new Error(`too large (${sizeText(bytes.length)})`);
-        await addAttachment(bytesToB64(bytes), info.name || x.d.name);
-        done++; x.cb.checked = false; x.cb.disabled = true; x.row.children[1].textContent = `${x.d.name} (attached)`;
-      } catch (e) { failed.push(`${x.d.name}: ${e.message}`); }
-    }
+    r = await attachDocs(forJob, chosen.map((x) => ({ d: x.d, ok: () => { x.cb.checked = false; x.cb.disabled = true; x.row.children[1].textContent = `${x.d.name} (attached)`; } })), (m) => setPickStatus(m, "busy"));
   } finally {
     sending = false; lockUI(false); $("pickFolder").disabled = false; refreshSend(); updatePickGo();
     if (pendingRefresh) { pendingRefresh = false; refreshForItem(true); }
   }
-  setPickStatus(`${done ? `Attached ${done} file${done === 1 ? "" : "s"} to your email. ` : ""}${failed.length ? `Not attached: ${failed.join("; ")}` : ""}`, failed.length ? "err" : "ok");
+  setPickStatus(attachSummary(r), r.failed.length ? "err" : "ok");
 }
 
+/* ---------- "Browse files…": a pop-up over the panel to walk through the job's folders ---------- */
+let brRun = 0, brStack = [], brPicked = new Map(), brDone = new Set();
+const brLabel = () => brStack.map((f) => f.name).join(" / ");
+function brSay(msg, cls) { $("brStatus").textContent = msg || ""; $("brStatus").className = cls || ""; }
+function brUpdate() { const n = brPicked.size; $("brGo").disabled = sending || !n; $("brGo").textContent = n ? `Attach selected (${n})` : "Attach selected"; $("brBack").disabled = brStack.length < 2 || sending; }
+function closeBrowse() { brRun++; $("browse").hidden = true; brPicked = new Map(); brDone = new Set(); brStack = []; }
+async function browseLoad() {
+  const run = ++brRun, forJob = job, top = brStack[brStack.length - 1];
+  if (!forJob) return closeBrowse();
+  $("brPath").textContent = brLabel(); $("brFolders").textContent = ""; $("brFiles").textContent = ""; brUpdate();
+  brSay("Loading…", "busy");
+  try {
+    const [detail, docs] = await Promise.all([
+      api(top.id ? `/documents/job/${forJob._id}/folders/${top.id}` : `/documents/job/${forJob._id}/folders`),
+      listDocs(forJob._id, top.id),
+    ]);
+    if (run !== brRun || job !== forJob) return;
+    const subs = (detail.subFolders || []).slice().sort(byName);
+    docs.sort(byName);
+    for (const f of subs) {
+      const b = document.createElement("button"); b.type = "button"; b.className = "brFolder"; b.textContent = `📁 ${f.name}`;
+      b.addEventListener("click", () => { if (!sending) { brStack.push({ id: f._id, name: f.name }); browseLoad(); } });
+      $("brFolders").appendChild(b);
+    }
+    for (const d of docs) {
+      const row = document.createElement("div"); row.className = "att";
+      const cb = document.createElement("input"); cb.type = "checkbox"; cb.setAttribute("aria-label", `Attach ${d.name}`);
+      const attached = brDone.has(d._id);
+      cb.checked = brPicked.has(d._id); cb.disabled = attached;
+      cb.addEventListener("change", () => { if (cb.checked) brPicked.set(d._id, d); else brPicked.delete(d._id); brUpdate(); });
+      const nm = document.createElement("span"); nm.textContent = attached ? `${d.name} (attached)` : d.name;
+      const sz = document.createElement("small"); sz.textContent = sizeText(d.size);
+      row.appendChild(cb); row.appendChild(nm); row.appendChild(sz); $("brFiles").appendChild(row);
+    }
+    brSay(subs.length || docs.length ? "" : "This folder is empty.");
+    brUpdate();
+  } catch (e) { if (run === brRun) brSay(e.message, "err"); }
+}
+function openBrowse() {
+  if (!job || sending) return;
+  brPicked = new Map(); brDone = new Set(); brStack = [{ id: "", name: job.name ? String(job.name).slice(0, 40) : "Job documents" }];
+  $("browse").hidden = false; brSay(""); browseLoad();
+}
+async function attachBrowsed() {
+  const forJob = job;
+  if (!forJob || sending || !brPicked.size) return;
+  const items = [...brPicked.values()].map((d) => ({ d, ok: () => { brPicked.delete(d._id); brDone.add(d._id); } }));
+  sending = true; lockUI(true); brUpdate();
+  let r = { done: 0, failed: [] };
+  try { r = await attachDocs(forJob, items, (m) => brSay(m, "busy")); }
+  finally {
+    sending = false; lockUI(false); refreshSend();
+    if (pendingRefresh) { pendingRefresh = false; refreshForItem(true); }
+  }
+  brSay(attachSummary(r), r.failed.length ? "err" : "ok");
+  if (!$("browse").hidden) browseLoad().then(() => brSay(attachSummary(r), r.failed.length ? "err" : "ok"));
+}
+$("browseBtn").addEventListener("click", openBrowse);
+$("brClose").addEventListener("click", () => { if (!sending) { const done = brDone.size; closeBrowse(); if (done) setPickStatus(`Attached ${done} file${done === 1 ? "" : "s"} to your email.`, "ok"); } });
+$("brBack").addEventListener("click", () => { if (!sending && brStack.length > 1) { brStack.pop(); browseLoad(); } });
+$("brGo").addEventListener("click", attachBrowsed);
+
 // Email header block + the email's own HTML. Scripts are removed, and inline (cid:) images are embedded.
-function prepBody(bodyHtml, cid) { // the email's own HTML made ready for a PDF
+function prepBody(bodyHtml, cid, noStyle) { // the email's own HTML made ready for a PDF
   let body = String(bodyHtml || "").replace(/<script[\s\S]*?<\/script>/gi, "");
   body = body.replace(/cid:([^"'\s)>]+)/gi, (m, id) => (cid && (cid.get(id.toLowerCase()) || cid.get(id.split("@")[0].toLowerCase()))) || m);
   // Pictures that could not be found would leave an empty gap or a broken icon, so they are replaced by a short note.
   body = body.replace(/<img\b[^>]*\bsrc\s*=\s*["']?cid:[^>]*>/gi, '<span style="color:#888;font-size:11px">[picture not included]</span>');
   // Runs of empty lines and paragraphs make big blank spaces: keep one.
-  return body.replace(/(<br\s*\/?>\s*){3,}/gi, "<br><br>").replace(/(<p\b[^>]*>(?:\s|&nbsp;|<br\s*\/?>|<o:p>\s*<\/o:p>)*<\/p>\s*){2,}/gi, "<p>&nbsp;</p>");
+  body = body.replace(/(<br\s*\/?>\s*){3,}/gi, "<br><br>").replace(/(<p\b[^>]*>(?:\s|&nbsp;|<br\s*\/?>|<o:p>\s*<\/o:p>)*<\/p>\s*){2,}/gi, "<p>&nbsp;</p>");
+  // no scripts, forms, frames, event handlers or page-wide settings from the email itself
+  try { if (window.WBThread && window.WBThread.sanitize) body = window.WBThread.sanitize(body, { keepStyle: !noStyle }); } catch { /* the page's own security policy still applies */ }
+  return body;
 }
 function buildEmailHtml({ subject, meta, bodyHtml, cid }) {
   const body = prepBody(bodyHtml, cid);
   const rows = meta.filter(([, v]) => v).map(([k, v]) =>
     `<tr><td style="padding:1px 10px 1px 0;font-weight:bold;vertical-align:top;white-space:nowrap">${escHtml(k)}</td><td style="padding:1px 0">${escHtml(v)}</td></tr>`).join("");
   return `<!doctype html><html><head><meta charset="utf-8">` +
-    `<meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'none'">` +
+    `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: https:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">` +
     `<style>img{max-width:100%!important;height:auto!important}*{break-inside:auto!important;page-break-inside:auto!important;min-height:0!important}div:empty,p:empty{display:none!important}</style></head><body style="margin:0">` + // keeps pictures in proportion
     `<div style="font:13px Arial,Helvetica,sans-serif;color:#000;border-bottom:1px solid #999;padding-bottom:10px;margin-bottom:14px">` +
     `<div style="font-size:18px;font-weight:bold;margin-bottom:8px">${escHtml(subject || "(No subject)")}</div><table style="border-collapse:collapse">${rows}</table></div>` +
@@ -759,7 +832,25 @@ function buildEmailHtml({ subject, meta, bodyHtml, cid }) {
 }
 
 /* ---------- one PDF per email conversation (optional setting) ---------- */
-const EML_LINK = ""; // web address pattern for a link to the job's files in Wunderbuild; {job} becomes the job id. Empty = no link.
+const WB_WEB = "https://preview.wunderbuild.com"; // the Wunderbuild web address used for the links inside the conversation PDF
+const wbLink = (jobId, folderId) => `${WB_WEB}/jobs/${encodeURIComponent(jobId)}/documents${folderId ? "/" + encodeURIComponent(folderId) : ""}`;
+// The PDF and conversation tools are only loaded when they are needed, so the panel opens quicker.
+const toolLoads = {};
+function loadTool(file, ready) {
+  if (ready()) return Promise.resolve();
+  if (!toolLoads[file]) {
+    toolLoads[file] = new Promise((ok, no) => {
+      const sc = document.createElement("script");
+      sc.src = `${file}?v=${APP_VERSION}`; sc.onload = () => (ready() ? ok() : no(new Error(`${file} did not start`))); sc.onerror = () => no(new Error(`${file} did not load`));
+      document.head.appendChild(sc);
+    });
+    toolLoads[file].catch(() => { delete toolLoads[file]; });
+  }
+  return toolLoads[file];
+}
+const haveWin = (k) => typeof window !== "undefined" && !!window[k];
+const loadThreadTool = () => loadTool("thread.js", () => haveWin("WBThread"));
+const loadConvTools = () => Promise.all([loadThreadTool(), loadTool("pdf-lib.min.js", () => haveWin("PDFLib") && !!window.PDFLib.PDFDocument)]);
 const parseMsgIds = (s) => String(s || "").match(/<[^>]+>/g) || [];
 function readThreadHeaders() { // Message-ID, In-Reply-To and References of the open email, when this Outlook can give them
   return new Promise((resolve) => {
@@ -807,7 +898,7 @@ function releaseConvLock(lock) { if (lock) lockCall("/lock/release", { key: lock
 
 // Adds this email to its conversation PDF (if there is one in the job) and draws the whole thing again.
 // Returns { bytes, old } where `old` is the earlier PDF to be replaced. Throws if anything is unusual: the caller then saves a normal PDF.
-async function buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId, docs }) {
+async function buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId, docs, outlookFolderId, emlName, topLink }) {
   const T = window.WBThread, L = window.PDFLib;
   if (!T || !L || !L.PDFDocument) throw new Error("the conversation tools did not load");
   const hdr = snap.compose ? {} : await readThreadHeaders();
@@ -816,46 +907,47 @@ async function buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId, d
   const list = (a) => (a || []).map((x) => x.displayName || x.emailAddress).join(", ").slice(0, 300);
   const cid = buildCidMap(bodyHtml, inl);
   const mkEntry = (t) => { // this email as an entry of the record
-    let html = prepBody(t.html, cid);
+    let html = T.sanitize(prepBody(t.html, cid, true), { keepStyle: false }); // the email's own page-wide styles are left out so they cannot change the rest of the PDF
     if (html.length > 300000) html = html.replace(/<img\b[^>]*\bsrc\s*=\s*["']?data:[^>]*>/gi, '<span style="color:#888;font-size:11px">[picture not included]</span>');
     return {
       id, at: (snap.date || new Date()).toISOString(),
       dir: snap.compose || (fromAddr && fromAddr.toLowerCase() === me) ? "sent" : "received",
       from: (snap.from && (snap.from.displayName || snap.from.emailAddress)) || "Unknown", fromAddr, to: list(snap.to), cc: list(snap.cc),
       atts: (snap.attachments || []).filter((a) => !a.isInline).map((a) => a.name), html,
-      hashes: T.hashesOf(t.full), quote: t.quote, quoteCount: t.quoteCount, quoteRatio: t.quoteRatio,
+      hashes: T.hashesOf(t.full), pairs: T.pairsOf(t.full), quote: t.quote, quoteCount: t.quoteCount, quoteRatio: t.quoteRatio,
       msgId: hdr.msgId || String(snap.internetMessageId || "").trim(), inReplyTo: hdr.inReplyTo || "", refs: hdr.refs || [],
+      link: outlookFolderId ? wbLink(jobId, outlookFolderId) : "", emlName: emlName || "",
     };
   };
   // which PDFs to look at: the one this computer remembers for the thread, then PDFs named for this subject
   const cands = [], seen = new Set();
   const add = (d) => { if (d && d._id && !seen.has(d._id) && !d.isDeleted) { seen.add(d._id); cands.push(d); } };
   const probe = mkEntry(T.trim(bodyHtml, null));
-  for (const k of T.threadKeys(probe)) {
-    try {
-      const r = JSON.parse(store.get(CPDF_PREFIX + hash40(k)) || "null");
-      if (r && r.j === jobId && r.d && !seen.has(r.d)) { const doc = await api(`/documents/job/${jobId}/${r.d}`); if (doc && doc._id) { add(doc); } }
-    } catch { /* gone or not readable: ignore */ }
-  }
+  const remembered = [...new Set(T.threadKeys(probe).map((k) => { try { const r = JSON.parse(store.get(CPDF_PREFIX + hash40(k)) || "null"); return r && r.j === jobId && r.d ? r.d : ""; } catch { return ""; } }).filter(Boolean))];
+  (await Promise.all(remembered.map((d) => api(`/documents/job/${jobId}/${d}`).catch(() => null)))).forEach((doc) => { if (doc && doc._id) add(doc); }); // gone or not readable: ignored
   const tail = cleanName(T.normSubject(subject)).trim().toLowerCase();
   (docs || []).filter((d) => isPdfDoc(d))
     .map((d) => ({ d, m: /^\d{4}-\d{2}-\d{2} - (.*?)(?: \(\d+\))?\.pdf$/i.exec(d.name || "") }))
     .filter((x) => x.m && x.m[1].trim().toLowerCase() === tail)
     .map((x) => x.d).sort((a, b) => String(b.name).localeCompare(String(a.name))).slice(0, 4).forEach(add);
   let meta = null, old = null, entry = null;
-  for (const d of cands.slice(0, 5)) {
+  // every candidate is downloaded and read at the same time; the first one (in order) that this email belongs to is used
+  const reads = await Promise.all(cands.slice(0, 5).map(async (d) => {
     try {
       const info = await api(`/documents/job/${jobId}/${d._id}/download-url`);
       const m = await T.unpackMeta(await fetchBytes(info.url), L);
-      if (!m) continue;
-      const e = mkEntry(T.trim(bodyHtml, T.knownHashes(m)));
-      if (T.belongs(m, e)) { meta = m; old = d; entry = e; break; }
-    } catch { /* not readable: try the next one */ }
+      return m ? { d, m } : null;
+    } catch { return null; } // not readable: the others are tried
+  }));
+  for (const r of reads) {
+    if (!r) continue;
+    const e = mkEntry(T.trim(bodyHtml, T.knownHashes(r.m, id), undefined, T.knownPairs(r.m, id)));
+    if (T.belongs(r.m, e)) { meta = r.m; old = r.d; entry = e; break; }
   }
   if (!entry) entry = probe; // a new conversation
   meta = T.addEntry(meta, subject, entry);
   if (JSON.stringify(meta).length > 3000000) throw new Error("the conversation is too long to keep in one PDF");
-  const page = T.pageHtml(meta, { linkFor: EML_LINK ? () => EML_LINK.replace("{job}", encodeURIComponent(jobId)) : null });
+  const page = T.pageHtml(meta, { topLink });
   return { bytes: await T.packMeta(await renderPdf(page), meta, L), old, count: meta.entries.length, keys: meta.entries.flatMap(T.threadKeys) };
 }
 
@@ -1128,7 +1220,7 @@ $("signOut").addEventListener("click", () => {
 let sending = false, pendingRefresh = false;
 function lockUI(on) {
   if (on) $("send").disabled = true;
-  $("q").disabled = on; $("name").disabled = on; $("wbAttachBtn").disabled = on || !job; $("wbClearBtn").disabled = on; $("subjPrefix").disabled = on; $("attMode").disabled = on; $("pickGo").disabled = on;
+  $("q").disabled = on; $("name").disabled = on; $("wbAttachBtn").disabled = on || !job; $("browseBtn").disabled = on || !job; $("brClose").disabled = on; $("brGo").disabled = on || brPicked.size === 0; $("wbClearBtn").disabled = on; $("subjPrefix").disabled = on; $("attMode").disabled = on; $("pickGo").disabled = on;
   $("folder").disabled = on || !job; $("attFolder").disabled = on || !job;
   for (const el of $("attList").querySelectorAll("input,select")) el.disabled = on;
   for (const el of $("jobs").querySelectorAll("button")) el.disabled = on;
@@ -1213,7 +1305,11 @@ $("send").addEventListener("click", async () => {
     // Check, right now, whether this email is already in the job (e.g. a colleague saved it first).
     const id = await idPromise;
     // The formatted PDF takes the longest, so it starts now, alongside the check below (unless the panel already knows it is saved).
-    const convOn = useFmt && $("convPdf").checked; // one PDF for the whole conversation
+    let convOn = useFmt && $("convPdf").checked; // one PDF for the whole conversation
+    if (useFmt) { // the page tools are loaded now, only because they are needed
+      try { await (convOn ? loadConvTools() : loadThreadTool()); }
+      catch (e) { diag("save", `tools not loaded: ${e.message}`); convOn = false; }
+    }
     const renderP = useFmt && !convOn && (snap.compose || !dupFound)
       ? (async () => renderPdf(buildEmailHtml({ subject, meta, bodyHtml, cid: buildCidMap(bodyHtml, inl) })))()
       : Promise.resolve(null);
@@ -1238,11 +1334,21 @@ $("send").addEventListener("click", async () => {
     for (let n = 2; taken.has(pdfName.toLowerCase()) && n < 100; n++) pdfName = `${baseName} (${n}).pdf`;
 
     let pdf = null, convOld = null, convUsed = false, convKeys = [];
+    const emlName = `${fileBase}.eml`;
+    let outlookFolderId = null; // known early, so the conversation PDF can link to the saved original email
+    if (convOn && needPdf && needEml) { try { outlookFolderId = await ensureOutlookFolder(folderId, jobAtSend._id); } catch { /* tried again when the original email is saved */ } }
+    const fixName = async () => { // Wunderbuild adds " (1)" when a name is already taken: once the earlier copy is gone the new PDF takes its name
+      if (!pdfDoc || !pdfDoc._id) return;
+      try {
+        const cur = await api(`/documents/job/${jobAtSend._id}/${pdfDoc._id}`);
+        if (cur && cur.name && cur.name !== pdfName) await api(`/documents/job/${jobAtSend._id}/${pdfDoc._id}`, { method: "PUT", body: JSON.stringify({ name: pdfName }) });
+      } catch (e) { problems.push(`the PDF could not be renamed to ${pdfName} (${e.message})`); }
+    };
     if (convOn && needPdf) {
       convLock = await acquireConvLock(`${jobAtSend._id}:${hash40(window.WBThread ? window.WBThread.subjectKey(subject) : String(subject))}`); // throws if someone else is updating it
       try {
         setStatus("Adding this email to its conversation PDF…", "busy");
-        const r = await buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId: jobAtSend._id, docs: nameDocs });
+        const r = await buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId: jobAtSend._id, docs: nameDocs, outlookFolderId, emlName, topLink: wbLink(jobAtSend._id, folderId) });
         pdf = r.bytes; convOld = r.old; convUsed = true; convKeys = r.keys;
         if (r.old) pdfName = r.old.name; // the conversation PDF keeps its name
         diag("save", `conversation PDF: ${r.count} message(s)${r.old ? ", replacing the earlier one" : ", new"}`);
@@ -1264,8 +1370,8 @@ $("send").addEventListener("click", async () => {
     })() : Promise.resolve();
     const emlJob = needEml ? (async () => {
       try {
-        const outlookFolderId = await ensureOutlookFolder(folderId, jobAtSend._id);
-        emlDoc = await uploadFile(`${fileBase}.eml`, "message/rfc822", eml, outlookFolderId, jobAtSend._id);
+        const ofId = outlookFolderId || await ensureOutlookFolder(folderId, jobAtSend._id);
+        emlDoc = await uploadFile(emlName, "message/rfc822", eml, ofId, jobAtSend._id);
         newEmlOk = true;
       } catch (e) { problems.push(`original email not saved (${e.message})`); }
     })() : Promise.resolve();
@@ -1283,6 +1389,7 @@ $("send").addEventListener("click", async () => {
     if (convOld && newPdfOk && (!needEml || newEmlOk)) { // the updated conversation PDF is in, so the earlier version of it goes
       try { await api(`/documents/job/${jobAtSend._id}/${convOld._id}`, { method: "DELETE" }); }
       catch (e) { if (!/404/.test(String(e && e.message))) problems.push(`the earlier conversation PDF could not be removed (${e.message})`); }
+      await fixName(); // the earlier PDF is gone, so the name is free again
     }
     releaseConvLock(convLock); convLock = null; // the conversation PDF is final: let the next person in
     if (replace) { // the new copies are in, so the earlier copies of this draft can go
@@ -1292,6 +1399,7 @@ $("send").addEventListener("click", async () => {
         if (newPdfOk && priorPdf && !oldPdf.some((d) => d._id === priorPdf)) await api(`/documents/job/${jobAtSend._id}/${priorPdf}`, { method: "DELETE" }).catch(gone);
         for (const d of newEmlOk ? oldEml : []) await api(`/documents/job/${jobAtSend._id}/${d._id}`, { method: "DELETE" }).catch(gone);
       } catch (e) { problems.push(`the earlier saved copy could not be removed (${e.message})`); }
+      if (newPdfOk && (priorPdf || oldPdf.length)) await fixName();
     }
 
     // Attachments: three at a time, reported in their original order.
@@ -1326,7 +1434,7 @@ $("send").addEventListener("click", async () => {
     } else {
       justSaved = jobAtSend._id;
       if (needPdf) {
-        msg = `${replace && oldPdf.length ? "Saved copy updated" : "Saved"}. ${convUsed ? "Conversation PDF" : "PDF"} in ${folderLabel}.`;
+        msg = `${replace && (oldPdf.length || priorPdf) ? "Saved copy updated" : "Saved"}. ${convUsed ? "Conversation PDF" : "PDF"} in ${folderLabel}.`;
         if (newEmlOk) msg += ` Original email in ${folderLabel} / Outlook Files.`;
       } else msg = `The PDF was already saved.${newEmlOk ? ` Added the missing original email in ${folderLabel} / Outlook Files.` : ""}`;
     }
@@ -1335,13 +1443,13 @@ $("send").addEventListener("click", async () => {
     if (!snap.compose && !problems.length) { dupFound = true; if (!savedAt) savedAt = new Date(); } // everything saved: the button turns into the green "Sent to Wunderbuild"
     const wantSend = snap.compose; // a draft is always sent as it is saved, so the saved copy matches what went out
     if (wantSend && problems.length) {
-      msg += " The email has NOT been sent because of the problems above. Fix them, or send it yourself.";
+      msg = `Saved, but not sent. ${msg} The email has NOT been sent because of the problems above. Fix them and press Save and send again (the saved copy is replaced, not added twice), or send it yourself.`;
     } else if (wantSend) {
       setStatus(msg + " Sending…", "busy");
       try { await sendDraft(); msg += " Email sent."; }
       catch (e) {
         msg += e.message === "unsupported" ? " Saved. This version of Outlook cannot send from the add-in, so click Outlook's Send button now."
-          : ` The email could not be sent automatically (${e.message}). Click Send yourself.`;
+          : ` Saved, but not sent (${e.message}). Press Save and send again to retry (the saved copy is replaced, not added twice), or click Send yourself.`;
         problems.push("not sent");
       }
     }
@@ -1659,4 +1767,6 @@ Office.onReady(async () => {
   // being written (e.g. an inline reply), so the mode is re-checked every time the item changes.
   Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { applyMode(); if (sending) { pendingRefresh = true; return; } refreshForItem(false); });
   await refreshForItem(false);
+  // Once the panel is up and quiet, the PDF tools are fetched in the background so saving does not wait for them.
+  if ($("fmtPdf").checked) setTimeout(() => { (($("convPdf").checked) ? loadConvTools() : loadThreadTool()).catch(() => {}); }, 2500);
 });

@@ -44,6 +44,17 @@
   #pickList{max-height:220px;overflow:auto;margin-top:8px}
   #pickStatus{margin-top:6px;font-size:12px;color:var(--muted)} #pickStatus.err{color:var(--bad)} #pickStatus.ok{color:var(--ok)}
   #pickGo{width:100%}
+  #browse{position:fixed;inset:0;z-index:50;background:var(--bg);padding:14px;overflow:auto}
+  #brHead{display:flex;justify-content:space-between;align-items:center;margin:-14px -14px 10px;padding:10px 14px;background:var(--navy);color:#fff;border-bottom:3px solid var(--brand)}
+  #brHead .sec{margin:0;background:none;color:#fff;border-color:#9fc9b8}
+  #brNav{display:flex;align-items:center;gap:8px}
+  #brNav .sec{margin:0;flex:none}
+  #brPath{color:var(--muted);font-size:12px;overflow-wrap:anywhere}
+  #brStatus{margin:8px 0;font-size:12px;color:var(--muted);min-height:1.2em} #brStatus.err{color:var(--bad)} #brStatus.ok{color:var(--ok)}
+  .brFolder{display:block;width:100%;text-align:left;padding:8px;margin:0 0 4px;border:1px solid var(--line);border-radius:4px;background:var(--soft);color:var(--ink);font:inherit;cursor:pointer}
+  .brFolder:hover{border-color:var(--accent)}
+  #brFiles{margin:8px 0 12px}
+  #brGo{width:100%;position:sticky;bottom:0;background:var(--bg)}
   .chk{display:flex;gap:6px;align-items:baseline;font-weight:400}
   .chk input{width:auto}
   #matchNote,#autoNote{margin-top:6px;color:var(--muted);font-size:12px}
@@ -101,7 +112,7 @@
 })();
 </script>
 
-<h1>Send to Wunderbuild <span id="ver" data-v="1.62">v1.48</span></h1>
+<h1>Send to Wunderbuild <span id="ver" data-v="1.63">v1.48</span></h1>
 
 <details id="settings">
   <summary>API settings</summary>
@@ -149,6 +160,7 @@
 
 <div id="wbAttach" hidden>
   <button type="button" class="sec" id="wbAttachBtn" disabled>Attach files from Wunderbuild</button>
+  <button type="button" class="sec" id="browseBtn" disabled>Browse files…</button>
   <button type="button" class="sec" id="wbClearBtn">Clear attachments</button>
   <div id="wbPick" hidden>
     <label for="pickQ" style="margin-top:0">Search file names in this job</label>
@@ -195,10 +207,17 @@
   <textarea id="diagOut" readonly rows="8" hidden aria-label="Troubleshooting report"></textarea>
 </details>
 
-<script src="pdf-lib.min.js?v=1.62"></script>
-<script src="thread.js?v=1.62"></script>
-<script src="pdf.js?v=1.62"></script>
-<script src="eml.js?v=1.62"></script>
-<script src="taskpane.js?v=1.62"></script>
+<div id="browse" role="dialog" aria-modal="true" aria-label="Browse files" hidden>
+  <div id="brHead"><b>Browse files</b><button type="button" class="sec" id="brClose">Close</button></div>
+  <div id="brNav"><button type="button" class="sec" id="brBack" disabled>◂ Back</button><span id="brPath"></span></div>
+  <div id="brStatus" role="status"></div>
+  <div id="brFolders"></div>
+  <div id="brFiles"></div>
+  <button type="button" class="sec" id="brGo" disabled>Attach selected</button>
+</div>
+
+<script src="pdf.js?v=1.63"></script>
+<script src="eml.js?v=1.63"></script>
+<script src="taskpane.js?v=1.63"></script>
 </body>
 </html>
