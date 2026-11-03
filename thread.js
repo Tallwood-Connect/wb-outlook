@@ -212,18 +212,60 @@
   /* ---- layout ---- */
   const safeUrl = (u) => (/^https:\/\/[^\s"'<>]+$/i.test(String(u || "")) ? String(u) : "");
   const fmtWhen = (iso) => new Date(iso).toLocaleString("en-AU", { weekday: "short", day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit", hour12: true });
-  function entryHtml(e, linkFor) {
-    const dir = e.dir === "sent" ? "Sent" : "Received";
-    const colour = e.dir === "sent" ? "#1D7A57" : "#2F5D8C";
+  // The grey bar that opens every message: who, received/sent, when, and the people it went to.
+  function headerHtml(h) { // { from, dir, when (text), to, cc, atts[], link, emlName }
+    const colour = "#4A6785"; // one colour for every message: sent / received depends on who is reading, so it is not shown
     const line = (label, v) => (v ? `<div><span style="color:#666">${label}</span> ${esc(v)}</div>` : "");
-    const link = safeUrl((linkFor && linkFor(e)) || e.link);
-    return `<section style="margin:0 0 16px 0">` +
-      `<div style="border-left:4px solid ${colour};background:#F3F5F7;padding:7px 12px;font:12px/1.45 Arial,Helvetica,sans-serif;break-inside:avoid">` +
-      `<div style="display:flex;justify-content:space-between;gap:10px"><div style="font-size:14px;font-weight:bold">${esc(e.from)}</div>` +
-      `<div style="white-space:nowrap"><span style="color:${colour};font-weight:bold">${dir}</span> · ${esc(fmtWhen(e.at))}</div></div>` +
-      line("To", e.to) + line("Cc", e.cc) + (e.atts && e.atts.length ? line("Attachments", e.atts.join(", ")) : "") +
-      (link ? `<div><a href="${esc(link)}" style="color:#1A5FB4">Open the original email file in Wunderbuild${e.emlName ? " (" + esc(e.emlName) + ")" : ""}</a></div>` : "") + `</div>` +
+    const link = safeUrl(h.link);
+    return `<div style="border-left:4px solid ${colour};background:#F3F5F7;padding:7px 12px;font:12px/1.45 Arial,Helvetica,sans-serif;break-inside:avoid">` +
+      `<div style="display:flex;justify-content:space-between;gap:10px"><div style="font-size:14px;font-weight:bold">${esc(h.from)}</div>` +
+      `<div style="white-space:nowrap">${esc(h.when || "")}</div></div>` +
+      line("To", h.to) + line("Cc", h.cc) + (h.atts && h.atts.length ? line("Attachments", h.atts.join(", ")) : "") +
+      (link ? `<div><a href="${esc(link)}" style="color:#1A5FB4">Open the original email file in Wunderbuild${h.emlName ? " (" + esc(h.emlName) + ")" : ""}</a></div>` : "") + `</div>`;
+  }
+  function entryHtml(e, linkFor) {
+    const h = headerHtml({ from: e.from, dir: e.dir, when: fmtWhen(e.at), to: e.to, cc: e.cc, atts: e.atts, link: (linkFor && linkFor(e)) || e.link, emlName: e.emlName });
+    return `<section style="margin:0 0 16px 0">${h}` +
       `<div style="font:13px/1.45 Arial,Helvetica,sans-serif;padding:8px 4px 0 16px" class="eb">${e.html}</div></section>`;
+  }
+  /* ---- earlier messages quoted inside an email: their "From: / Sent: / To: / Subject:" blocks become the same bar ---- */
+  const HDR_LABEL = /^(from|sent|date|to|cc|bcc|subject|importance|attachments?|reply-to):/i;
+  const names = (v) => String(v || "").split(/;\s*/).map((x) => x.replace(/\s*<[^>]*>/g, "").replace(/^["'\s]+|["'\s]+$/g, "")).filter(Boolean).join(", ").slice(0, 300);
+  const whenText = (v) => { const raw = String(v || "").trim(); if (!raw || /^\d{1,2}[\/.]\d{1,2}[\/.]\d{2,4}/.test(raw)) return raw; const iso = parseWhen(raw); return iso ? fmtWhen(iso) : raw; }; // day/month dates are shown as written
+  function restyleHeaders(html, opts, parse) {
+    const P = parse || ((h) => new DOMParser().parseFromString(h || "", "text/html"));
+    const me = ((opts && opts.me) || []).map((x) => String(x || "").toLowerCase().trim()).filter(Boolean);
+    const doc = P(html), body = doc.body;
+    const mk = (h) => { const d = doc.createElement("div"); d.setAttribute("style", "margin:14px 0 6px 0"); d.innerHTML = headerHtml(h); return d; };
+    const dropRule = (n) => { // the separator line (or Outlook's top border) that used to mark the break
+      let a = n; while (a.parentNode && a.parentNode !== body && !a.previousElementSibling) a = a.parentNode;
+      if (a.previousElementSibling && a.previousElementSibling.tagName === "HR") a.previousElementSibling.parentNode.removeChild(a.previousElementSibling);
+      for (let p = n.parentNode, k = 0; p && p !== body && k < 4; p = p.parentNode, k++) { const st = p.getAttribute && p.getAttribute("style"); if (st && /border-top/i.test(st)) p.setAttribute("style", st.replace(/border(-top)?\s*:[^;]*;?/gi, "")); }
+    };
+    const cands = [];
+    for (const el of Array.from(body.querySelectorAll("div,p,font,td,blockquote,span"))) {
+      const t = toText(el); if (t.length > 1500 || !/^\s*From:/i.test(t) || !/(^|\n)\s*(Sent|Date):/i.test(t)) continue;
+      const lines = t.split("\n").map((l) => l.replace(/\s+/g, " ").trim()).filter(Boolean);
+      if (lines.length && lines.every((l) => HDR_LABEL.test(l))) cands.push({ el, lines });
+    }
+    for (const c of cands.filter((x) => !cands.some((o) => o !== x && x.el.contains(o.el)))) { // the innermost element holding only the header lines
+      if (!c.el.parentNode) continue;
+      const v = {}; for (const l of c.lines) { const m = /^([A-Za-z-]+):\s*(.*)$/.exec(l); if (m && !v[m[1].toLowerCase()]) v[m[1].toLowerCase()] = m[2]; }
+      const fromRaw = v.from || "", low = fromRaw.toLowerCase();
+      const sent = me.some((x) => x && low.indexOf(x) >= 0);
+      const node = mk({ from: names(fromRaw) || "Unknown", dir: sent ? "sent" : "received", when: whenText(v.sent || v.date), to: names(v.to), cc: names(v.cc), atts: v.attachment || v.attachments ? [String(v.attachment || v.attachments).replace(/\s*;\s*/g, ", ")] : [] });
+      c.el.parentNode.replaceChild(node, c.el); dropRule(node);
+    }
+    for (const el of Array.from(body.querySelectorAll(".gmail_attr, div, p"))) { // Gmail / Apple: "On Fri, 30 Oct 2026 at 11:05, Mark Ellis <mark@x.com> wrote:"
+      if (!el.parentNode || (el.tagName !== "DIV" && el.tagName !== "P" && !el.classList.contains("gmail_attr"))) continue;
+      const t = (el.textContent || "").replace(/\s+/g, " ").trim();
+      const m = /^On (.{6,200}?) wrote:$/i.exec(t); if (!m || el.querySelector("div,p")) continue;
+      const em = /([^<,]*)<([^>]+)>\s*$/.exec(m[1]); const nm = em ? em[1].replace(/^.*?\d{4}[^,]*,?\s*(at\s+[\d:. apm]+,?)?\s*/i, "").trim() || em[2] : m[1];
+      const iso = parseWhen(m[1].replace(/,?\s*[^,]*<[^>]*>\s*$/, ""));
+      const node = mk({ from: nm, dir: me.some((x) => x && m[1].toLowerCase().indexOf(x) >= 0) ? "sent" : "received", when: iso ? fmtWhen(iso) : "" });
+      el.parentNode.replaceChild(node, el);
+    }
+    return doc.head.innerHTML.replace(/<(?!\/?style\b)[^>]*>/gi, "") + body.innerHTML;
   }
   /* A straight run of replies stays at one level. Only where a message was answered more than once does each
      answer get its own indented branch, with a line down the side. */
@@ -331,5 +373,5 @@ function belongs(meta, e) {
     return m;
   }
 
-  root.WBThread = { normSubject, subjectKey, trim, sanitize, hashesOf, pairsOf, knownHashes, knownPairs, pageHtml, packMeta, unpackMeta, addEntry, resolveParents, personKey, parseQuoteHeader, belongs, threadKeys };
+  root.WBThread = { normSubject, subjectKey, trim, sanitize, restyleHeaders, hashesOf, pairsOf, knownHashes, knownPairs, pageHtml, packMeta, unpackMeta, addEntry, resolveParents, personKey, parseQuoteHeader, belongs, threadKeys };
 })(typeof window !== "undefined" ? window : globalThis);

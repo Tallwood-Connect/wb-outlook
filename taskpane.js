@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.64"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.65"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const missingEls = {}; // a page kept from an older version may lack newer controls: they get a harmless stand-in instead of crashing the panel
 const $ = (id) => document.getElementById(id) || (missingEls[id] || (missingEls[id] = document.createElement("div")));
@@ -857,6 +857,13 @@ function prepBody(bodyHtml, cid, noStyle) { // the email's own HTML made ready f
   body = body.replace(/(<br\s*\/?>\s*){3,}/gi, "<br><br>").replace(/(<p\b[^>]*>(?:\s|&nbsp;|<br\s*\/?>|<o:p>\s*<\/o:p>)*<\/p>\s*){2,}/gi, "<p>&nbsp;</p>");
   // no scripts, forms, frames, event handlers or page-wide settings from the email itself
   try { if (window.WBThread && window.WBThread.sanitize) body = window.WBThread.sanitize(body, { keepStyle: true }); } catch { /* the page's own security policy still applies */ }
+  // earlier emails quoted inside this one get the same grey header bar as every other message
+  try {
+    if (window.WBThread && window.WBThread.restyleHeaders) {
+      const prof = (Office.context.mailbox && Office.context.mailbox.userProfile) || {};
+      body = window.WBThread.restyleHeaders(body, { me: [prof.emailAddress, prof.displayName] });
+    }
+  } catch { /* the original header text stays */ }
   return body;
 }
 function buildEmailHtml({ subject, meta, bodyHtml, cid }) {
