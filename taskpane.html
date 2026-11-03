@@ -101,7 +101,7 @@
 })();
 </script>
 
-<h1>Send to Wunderbuild <span id="ver" data-v="1.61">v1.48</span></h1>
+<h1>Send to Wunderbuild <span id="ver" data-v="1.62">v1.48</span></h1>
 
 <details id="settings">
   <summary>API settings</summary>
@@ -110,6 +110,7 @@
   <label for="base">API base URL (proxy address ending /api)</label>
   <input id="base" type="url" value="https://api.wunderbuild.com/api">
   <label class="chk"><input type="checkbox" id="fmtPdf" checked> Formatted PDF (rendered by the Cloudflare Worker)</label>
+  <label class="chk"><input type="checkbox" id="convPdf" checked> One PDF per email conversation (beta): later emails in the same conversation are added to the same PDF</label>
   <label class="chk"><input type="checkbox" id="askSend"> Ask me to save sent emails to Wunderbuild when I click Send</label>
   <div class="btns">
     <button type="button" class="sec" id="clearCache">Clear saved job list and history</button>
@@ -194,8 +195,10 @@
   <textarea id="diagOut" readonly rows="8" hidden aria-label="Troubleshooting report"></textarea>
 </details>
 
-<script src="pdf.js?v=1.61"></script>
-<script src="eml.js?v=1.61"></script>
-<script src="taskpane.js?v=1.61"></script>
+<script src="pdf-lib.min.js?v=1.62"></script>
+<script src="thread.js?v=1.62"></script>
+<script src="pdf.js?v=1.62"></script>
+<script src="eml.js?v=1.62"></script>
+<script src="taskpane.js?v=1.62"></script>
 </body>
 </html>
