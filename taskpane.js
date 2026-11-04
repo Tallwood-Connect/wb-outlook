@@ -1,6 +1,10 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.80"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.81"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
+// The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
+// uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
+const OLD_WORKER_HOST = "wb-proxy.jason-984.workers.dev", NEW_WORKER_HOST = "wb-proxy.tallwood.workers.dev";
+const moveWorkerHost = (u) => String(u || "").split(OLD_WORKER_HOST).join(NEW_WORKER_HOST);
 const missingEls = {}; // a page kept from an older version may lack newer controls: they get a harmless stand-in instead of crashing the panel
 const $ = (id) => document.getElementById(id) || (missingEls[id] || (missingEls[id] = document.createElement("div")));
 const store = {
@@ -1986,6 +1990,7 @@ Office.onReady(async () => {
   purge((k) => k === "wb_job" || k === "wb_jobs_v1" || k.startsWith("wb_folder_")); // leftovers from older versions
   pruneConv();
   $("key").value = store.get("wb_key") || "";
+  { const savedBase = store.get("wb_base"), movedBase = moveWorkerHost(savedBase); if (savedBase && movedBase !== savedBase) { store.set("wb_base", movedBase); diag("settings", "the Worker address was switched to the new workers.dev name"); } }
   $("base").value = store.get("wb_base") || DEFAULT_BASE;
   $("fmtPdf").checked = store.get("wb_fmtpdf") !== "0";
   $("convPdf").checked = store.get("wb_convpdf") !== "0"; // on unless switched off

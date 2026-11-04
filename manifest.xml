@@ -5,7 +5,7 @@
   xmlns:mailappor="http://schemas.microsoft.com/office/mailappversionoverrides/1.0"
   xsi:type="MailApp">
   <Id>aabbef90-b8c4-49fb-81d6-4b3f273b47e3</Id>
-  <Version>1.0.0.16</Version>
+  <Version>1.0.0.17</Version>
   <ProviderName>Tallwood</ProviderName>
   <DefaultLocale>en-AU</DefaultLocale>
   <DisplayName DefaultValue="Send to Wunderbuild"/>
@@ -16,7 +16,7 @@
   <AppDomains>
     <AppDomain>https://api.wunderbuild.com</AppDomain>
     <AppDomain>https://preview.wunderbuild.com</AppDomain>
-    <AppDomain>https://wb-proxy.jason-984.workers.dev</AppDomain>
+    <AppDomain>https://wb-proxy.tallwood.workers.dev</AppDomain>
   </AppDomains>
   <Hosts><Host Name="Mailbox"/></Hosts>
   <Requirements><Sets><Set Name="Mailbox" MinVersion="1.1"/></Sets></Requirements>
