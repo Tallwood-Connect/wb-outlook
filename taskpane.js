@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.89"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.90"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -1139,7 +1139,10 @@ async function buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId, d
   const add = (d) => { if (d && d._id && !seen.has(d._id) && !d.isDeleted) { seen.add(d._id); cands.push(d); } };
   const probe = mkEntry(T.trim(bodyHtml, null));
   const remembered = [...new Set(T.threadKeys(probe).map((k) => { try { const r = JSON.parse(store.get(CPDF_PREFIX + hash40(k)) || "null"); return r && r.j === jobId && r.d ? r.d : ""; } catch { return ""; } }).filter(Boolean))];
-  (await Promise.all(remembered.map((d) => api(`/documents/job/${jobId}/${d}`).catch(() => null)))).forEach((doc) => { if (doc && doc._id) add(doc); }); // gone or not readable: ignored
+  (await Promise.all(remembered.map((d) => api(`/documents/job/${jobId}/${d}`).catch((e) => { // gone or not readable: ignored, and forgotten so it is not asked about again
+    if (/returned (400|404)\b/.test(String(e && e.message))) for (const k of Object.keys(localStorage)) { if (k.startsWith(CPDF_PREFIX)) { try { if (JSON.parse(localStorage.getItem(k)).d === d) localStorage.removeItem(k); } catch { /* ignore */ } } }
+    return null;
+  })))).forEach((doc) => { if (doc && doc._id) add(doc); });
   const tail = cleanName(T.normSubject(subject)).trim().toLowerCase();
   (docs || []).filter((d) => isPdfDoc(d))
     .map((d) => ({ d, m: /^\d{4}-\d{2}-\d{2} - (.*?)(?: \(\d+\))?\.pdf$/i.exec(d.name || "") }))
