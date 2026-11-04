@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.72"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.73"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const missingEls = {}; // a page kept from an older version may lack newer controls: they get a harmless stand-in instead of crashing the panel
 const $ = (id) => document.getElementById(id) || (missingEls[id] || (missingEls[id] = document.createElement("div")));
@@ -70,19 +70,24 @@ function refreshSend() {
 
 // Wunderbuild limits how fast requests can be made, so at most 4 run at once, and a "429 Too Many Requests" reply
 // is retried after a short wait (nothing has been done by the server when it says that, so retrying is safe).
-let apiActive = 0; const apiQueue = [];
-const apiSlot = () => new Promise((go) => { if (apiActive < 4) { apiActive++; go(); } else apiQueue.push(go); });
-const apiFree = () => { const next = apiQueue.shift(); if (next) next(); else apiActive--; };
+// Background work (listing every folder of a job, indexing file names) goes in the "low" line, so what the person is
+// waiting for (checking whether an email is saved, picking a folder, saving) is never held up behind it.
+let apiActive = 0; const apiQueue = [], apiLowQueue = [];
+let apiLast = { wait: 0, took: 0 }; // timing of the latest call, for the Troubleshooter
+const apiSlot = (low) => new Promise((go) => { if (apiActive < 4) { apiActive++; go(); } else (low ? apiLowQueue : apiQueue).push(go); });
+const apiFree = () => { const next = apiQueue.shift() || apiLowQueue.shift(); if (next) next(); else apiActive--; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const plainError = (t) => String(t || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
 async function api(path, opts = {}) {
+  const low = !!opts.low; if (low) { opts = { ...opts }; delete opts.low; }
   const key = $("key").value.trim();
   if (!key) { $("settings").open = true; throw new Error("Add your Wunderbuild API key under API settings."); }
   if (!/^https:\/\//i.test(base())) throw new Error("The API base URL must start with https:// (the key is never sent over an unprotected link).");
   for (let attempt = 0; ; attempt++) {
     let res;
-    await apiSlot();
-    const began = Date.now();
+    const queuedAt = Date.now();
+    await apiSlot(low);
+    const began = Date.now(), waited = began - queuedAt;
     try {
       res = await fetch(base() + path, {
         ...opts,
@@ -92,6 +97,8 @@ async function api(path, opts = {}) {
       diag("network", `${opts.method || "GET"} ${path.split("?")[0]} failed after ${Date.now() - began} ms (${err && err.message})`);
       throw new Error(`Request to ${base()}${path.split("?")[0]} was blocked or failed (${err && err.message}). Check the API base URL and the proxy settings.`);
     } finally { apiFree(); }
+    apiLast = { wait: waited, took: Date.now() - began };
+    if (waited > 1500 || apiLast.took > 2500) diag("slow", `${opts.method || "GET"} ${path.split("?")[0]}: waited ${waited} ms in line, answered in ${apiLast.took} ms`);
     if (!res.ok) diag("api", `${opts.method || "GET"} ${path.split("?")[0]} -> ${res.status} after ${Date.now() - began} ms${attempt ? ` (try ${attempt + 1})` : ""}`);
     if (res.status === 429 && attempt < 5) {
       const ra = Number(res.headers && res.headers.get && res.headers.get("retry-after"));
@@ -625,19 +632,20 @@ function folderTrees(jobId) {
     let rootData = null;
     t.root = api(`/documents/job/${jobId}/folders`).then((r) => { rootData = r; return flattenTree(r); });
     t.promise = t.root.then(async () => {
-      let calls = 0;
+      let calls = 0; const walkStart = Date.now();
       const expand = async (f, depth) => {
         if (isArchiveName(f.name)) return; // no need to look inside
         let subs = f.subFolders || [];
         if (!subs.length && depth < 8 && calls < 300) {
           calls++;
-          try { subs = (await api(`/documents/job/${jobId}/folders/${f._id}`)).subFolders || []; } catch { /* leave it as a last-level folder */ }
+          try { subs = (await api(`/documents/job/${jobId}/folders/${f._id}`, { low: true })).subFolders || []; } catch { /* leave it as a last-level folder */ }
         }
         f.subFolders = subs;
         await Promise.all(subs.map((x) => expand(x, depth + 1)));
       };
       await Promise.all((rootData.subFolders || []).map((f) => expand(f, 1)));
       const out = flattenTree(rootData);
+      diag("folders", `listed ${out.length - 1} folders using ${calls} request(s) in ${Date.now() - walkStart} ms (background)`);
       store.set(TREE_KEY(jobId), JSON.stringify({ at: Date.now(), list: out }));
       t.full = out;
       return out;
@@ -660,7 +668,7 @@ function jobFileIndex(jobId) {
     const worker = async () => {
       while (queue.length) {
         const f = queue.shift();
-        try { for (const d of await listDocs(jobId, f.id)) files.push({ d, path: f.path }); } catch { files.partial = true; }
+        try { for (const d of await listDocs(jobId, f.id, true)) files.push({ d, path: f.path }); } catch { files.partial = true; }
         indexProgress(++done, folders.length);
       }
     };
@@ -1055,17 +1063,18 @@ async function emailId(item) {
   ).toLowerCase());
 }
 
-async function listDocs(jobId, folderId) {
+async function listDocs(jobId, folderId, low) {
+  const o = low ? { low: true } : {};
   const url = (page) => `/documents/job/${jobId}?page=${page}&limit=100${folderId ? `&folderId=${folderId}` : ""}`;
-  const first = await api(url(1));
+  const first = await api(url(1), o);
   let out = (first.result || []).filter((x) => !x.isDeleted);
   const p = first.pagination || {};
   if (p.totalPages > 1) { // the remaining pages are asked for together
-    const rest = await Promise.all(Array.from({ length: Math.min(p.totalPages, 30) - 1 }, (_, i) => api(url(i + 2))));
+    const rest = await Promise.all(Array.from({ length: Math.min(p.totalPages, 30) - 1 }, (_, i) => api(url(i + 2), o)));
     for (const d of rest) out = out.concat((d.result || []).filter((x) => !x.isDeleted));
   } else if (p.hasNextPage) { // no page count given: go one page at a time
     for (let page = 2; page <= 30; page++) {
-      const d = await api(url(page));
+      const d = await api(url(page), o);
       out = out.concat((d.result || []).filter((x) => !x.isDeleted));
       if (!d.pagination || !d.pagination.hasNextPage) break;
     }
@@ -1619,7 +1628,7 @@ async function timedCheck(label, fn) {
   const t0 = Date.now();
   try {
     const out = await Promise.race([fn(), new Promise((_, rej) => setTimeout(() => rej(new Error("no answer after 20 s")), 20000))]);
-    return `${label}: OK in ${Date.now() - t0} ms${out ? ` (${out})` : ""}`;
+    return `${label}: OK in ${Date.now() - t0} ms${out ? ` (${out})` : ""}${/PDF/.test(label) ? "" : ` [waited ${apiLast.wait} ms in line, answered in ${apiLast.took} ms]`}`;
   } catch (e) { return `${label}: FAILED after ${Date.now() - t0} ms - ${describeError(e)}`; }
 }
 async function buildReport() {
@@ -1667,6 +1676,7 @@ async function buildReport() {
   add(`Job: ${job ? `${fullJobNo(job)} ${job.name} (${job._id})` : "none chosen"}${jobAuto ? " (filled in automatically)" : ""}`);
   add(`Folders: ${$("folder").options.length} listed | email folder: ${$("folder").selectedOptions[0] ? $("folder").selectedOptions[0].text : "-"} | attachment folder: ${$("attFolder").selectedOptions[0] ? $("attFolder").selectedOptions[0].text : "-"}`);
   add(`Folder list failed: ${foldersFailed} | still loading: ${foldersPending} | Correspondence missing: ${corrMissing}`);
+  add(`Requests in progress: ${apiActive} | waiting: ${apiQueue.length} urgent + ${apiLowQueue.length} background`);
   add(`Already saved: ${dupFound}${savedAt ? ` (${savedAt.toLocaleString("en-AU")})` : ""}${repliedOnly ? " - because a reply was saved" : ""} | saving now: ${sending}`);
   add(`File name box: ${$("name").value} | edited by hand: ${nameEdited} | attachment folders: ${$("attMode").checked ? "individual" : "one folder"}`);
   add(`Send button: "${$("send").textContent}" ${$("send").disabled ? "(disabled)" : "(enabled)"}`);
