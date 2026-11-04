@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.79"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.80"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const missingEls = {}; // a page kept from an older version may lack newer controls: they get a harmless stand-in instead of crashing the panel
 const $ = (id) => document.getElementById(id) || (missingEls[id] || (missingEls[id] = document.createElement("div")));
@@ -1819,8 +1819,21 @@ async function buildReport() {
     const four = await Promise.all([1, 2, 3, 4].map(() => one(`${root}/ping?t=${stamp()}`)));
     add(`   4 at the same time: ${four.join(" | ")} (all done in ${Math.round(performance.now() - par)} ms)`);
     if (key) {
-      add("B. Through the Worker to Wunderbuild, with the key (one job):");
-      for (let i = 1; i <= 3; i++) add(`   try ${i}: ${await one(`${base()}/jobs?page=1&limit=1&t=${stamp()}`, { headers: { "x-api-key": key, "Content-Type": "application/json" } })}`);
+      const timed = async (url) => { const t0 = performance.now(); try { const r = await fetch(url, { headers: { "x-api-key": key, "Content-Type": "application/json" }, signal: AbortSignal.timeout(30000) }); await r.text(); return r.ok ? Math.round(performance.now() - t0) : null; } catch { return null; } };
+      const stats = (label, arr, fails) => {
+        const v = arr.filter((x) => x !== null).sort((x, y) => x - y);
+        if (!v.length) return add(`   ${label}: no successful answers (${fails} failed)`);
+        add(`   ${label}: fastest ${v[0]} ms | middle ${v[Math.floor(v.length / 2)]} ms | average ${Math.round(v.reduce((x, y) => x + y, 0) / v.length)} ms | slowest ${v[v.length - 1]} ms | ${v.length} answered${fails ? `, ${fails} failed` : ""}`);
+      };
+      add("B. Through the Worker to Wunderbuild, with the key (8 calls one after another each):");
+      const jt = []; for (let i = 0; i < 8; i++) jt.push(await timed(`${base()}/jobs?page=1&limit=1`));
+      stats("Job list", jt, jt.filter((x) => x === null).length);
+      add(`   each: ${jt.map((x) => (x === null ? "failed" : x + " ms")).join(", ")}`);
+      if (job) {
+        const ft = []; for (let i = 0; i < 8; i++) ft.push(await timed(`${base()}/documents/job/${job._id}/folders`));
+        stats("Folders of the chosen job", ft, ft.filter((x) => x === null).length);
+        add(`   each: ${ft.map((x) => (x === null ? "failed" : x + " ms")).join(", ")}`);
+      }
     }
     try {
       const es = performance.getEntriesByType("resource").filter((e) => e.name.indexOf("/ping") > -1);
