@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.83"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.84"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -586,19 +586,62 @@ async function shrinkImage(f) {
 // Matches each cid: reference in the email to an inline image. Outlook does not give a draft's images their
 // content IDs, so images are matched by name first (the id is usually "name.png@code"), then in order of appearance
 // (several pasted images are all called "image.png").
-function buildCidMap(html, inl) {
+// In a long conversation many pictures share one name ("image001.png" in every signature), and Outlook lists the
+// attachments in a different order from the order the pictures appear in the email, so name and order alone can
+// put a picture in the wrong place. Where more than one picture could fit, the shape (width : height) of the
+// picture tag in the email is compared with the shape of each candidate file, and the closest one is used.
+function imageSize(b) { // [width, height] from the file header (PNG, JPEG, GIF), or null
+  try {
+    if (b.length > 24 && b[0] === 0x89 && b[1] === 0x50) return [((b[16] << 24) | (b[17] << 16) | (b[18] << 8) | b[19]) >>> 0, ((b[20] << 24) | (b[21] << 16) | (b[22] << 8) | b[23]) >>> 0];
+    if (b.length > 10 && b[0] === 0x47 && b[1] === 0x49) return [b[6] | (b[7] << 8), b[8] | (b[9] << 8)];
+    if (b.length > 4 && b[0] === 0xff && b[1] === 0xd8) {
+      let i = 2;
+      while (i + 9 < b.length) {
+        if (b[i] !== 0xff) { i++; continue; }
+        const m = b[i + 1];
+        if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) return [(b[i + 7] << 8) | b[i + 8], (b[i + 5] << 8) | b[i + 6]];
+        i += 2 + ((b[i + 2] << 8) | b[i + 3]);
+      }
+    }
+  } catch { /* unknown shape */ }
+  return null;
+}
+function tagShape(html, id) { // width / height of the first <img> that points at this cid, or 0 when the tag does not say
+  const re = /<img\b[^>]*>/gi; let m;
+  while ((m = re.exec(html))) {
+    const t = m[0]; if (t.toLowerCase().indexOf("cid:" + id) < 0) continue;
+    const dim = (n) => { const a = new RegExp("\\b" + n + "\\s*=\\s*[\"']?(\\d+(?:\\.\\d+)?)", "i").exec(t) || new RegExp("[;\"'\\s]" + n + "\\s*:\\s*(\\d+(?:\\.\\d+)?)\\s*px", "i").exec(t); return a ? Number(a[1]) : 0; };
+    const w = dim("width"), h = dim("height");
+    return w > 0 && h > 0 ? w / h : 0;
+  }
+  return 0;
+}
+function buildCidMap(html, inl, note) {
   const items = (inl || []).filter((r) => r && r.f), map = new Map(), used = new Set();
   const uri = (r) => `data:${r.f.type};base64,${bytesToB64(r.f.bytes)}`;
-  const ids = [...new Set([...String(html || "").matchAll(/cid:([^"'\s)>]+)/gi)].map((m) => m[1].toLowerCase()))];
-  const left = [];
+  const text = String(html || "");
+  const ids = [...new Set([...text.matchAll(/cid:([^"'\s)>]+)/gi)].map((m) => m[1].toLowerCase()))];
+  const shapeOf = new Map(); const fileShape = (r) => { if (!shapeOf.has(r)) { const d = imageSize(r.f.bytes); shapeOf.set(r, d && d[0] && d[1] ? d[0] / d[1] : 0); } return shapeOf.get(r); };
+  const pick = (id, cands) => { // the candidate whose shape best fits the picture tag; the first one when nothing can tell them apart
+    if (cands.length < 2) return { r: cands[0], how: "only one" };
+    const want = tagShape(text, id);
+    if (want) {
+      let best = null, bestGap = Infinity, second = Infinity;
+      for (const r of cands) { const fs = fileShape(r); if (!fs) continue; const gap = Math.abs(Math.log(fs / want)); if (gap < bestGap) { second = bestGap; bestGap = gap; best = r; } else if (gap < second) second = gap; }
+      if (best && bestGap < 0.06 && second - bestGap > 0.02) return { r: best, how: "shape" };
+    }
+    return { r: cands[0], how: "order" };
+  };
+  const left = [], guessed = [];
   for (const id of ids) {
     const base = id.split("@")[0];
-    const r = items.find((x) => !used.has(x) && (x.a.name || "").toLowerCase() === base);
-    if (r) { used.add(r); map.set(id, uri(r)); } else left.push(id);
+    const named = items.filter((x) => !used.has(x) && (x.a.name || "").toLowerCase() === base);
+    if (named.length) { const p = pick(id, named); used.add(p.r); map.set(id, uri(p.r)); if (named.length > 1 && p.how === "order") guessed.push(id); } else left.push(id);
   }
-  for (const id of left) { const r = items.find((x) => !used.has(x)); if (r) { used.add(r); map.set(id, uri(r)); } }
+  for (const id of left) { const c = items.filter((x) => !used.has(x)); if (!c.length) continue; const p = pick(id, c); used.add(p.r); map.set(id, uri(p.r)); if (p.how === "order") guessed.push(id); }
   for (const r of items) { const k = (r.a.name || "").toLowerCase(); if (k && !map.has(k)) map.set(k, uri(r)); }
   for (const r of items) if (r.a.id) map.set("id:" + r.a.id, uri(r)); // Outlook on the web names a picture's attachment inside the picture tag
+  if (note) note(`${ids.length} picture(s) in the email, ${items.length} image file(s) found, ${guessed.length} placed by list order only${guessed.length ? " (may be in the wrong place)" : ""}`);
   return map;
 }
 
@@ -1491,7 +1534,7 @@ $("send").addEventListener("click", async () => {
       catch (e) { diag("save", `tools not loaded: ${e.message}`); convOn = false; }
     }
     const renderP = useFmt && !convOn && (snap.compose || !dupFound)
-      ? (async () => renderPdf(buildEmailHtml({ subject, meta, bodyHtml, cid: buildCidMap(bodyHtml, inl) })))()
+      ? (async () => renderPdf(buildEmailHtml({ subject, meta, bodyHtml, cid: buildCidMap(bodyHtml, inl, (m) => diag("pictures", m)) })))()
       : Promise.resolve(null);
     renderP.catch(() => {}); // a failure is reported where the result is used
     let existing = [];
@@ -1538,7 +1581,7 @@ $("send").addEventListener("click", async () => {
       try {
         setStatus("Rendering formatted PDF…", "busy");
         pdf = await renderP;
-        if (!pdf) pdf = await renderPdf(buildEmailHtml({ subject, meta, bodyHtml, cid: buildCidMap(bodyHtml, inl) }));
+        if (!pdf) pdf = await renderPdf(buildEmailHtml({ subject, meta, bodyHtml, cid: buildCidMap(bodyHtml, inl, (m) => diag("pictures", m)) }));
       } catch (e) { problems.push(`formatted PDF unavailable (${e.message}), so a basic text PDF was saved instead`); }
     }
     let newPdfOk = false, newEmlOk = false, emlDoc = null, pdfDoc = null;
