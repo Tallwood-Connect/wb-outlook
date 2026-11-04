@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.75"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.76"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const missingEls = {}; // a page kept from an older version may lack newer controls: they get a harmless stand-in instead of crashing the panel
 const $ = (id) => document.getElementById(id) || (missingEls[id] || (missingEls[id] = document.createElement("div")));
@@ -1285,6 +1285,35 @@ $("clearCache").addEventListener("click", () => {
   purge((k) => k === JOBS_KEY || k === "wb_job" || k.startsWith("wb_ftree_") || k.startsWith("wb_sent_") || k.startsWith(CONV_PREFIX) || k.startsWith(CPDF_PREFIX));
   $("clearNote").textContent = "Saved job list and conversation history cleared.";
 });
+// Set-up helper: reads the folder list of every job once and keeps it on this computer, so later jobs open at once.
+// Works through the jobs two at a time in the background line (anything you are doing in the panel still goes first).
+let prepRun = 0;
+$("prepFolders").addEventListener("click", async () => {
+  const btn = $("prepFolders"), note = $("prepNote");
+  if (btn.dataset.busy) { prepRun++; return; } // pressed again while running = stop
+  if (!$("key").value.trim()) { note.textContent = "Add your API key first."; return; }
+  const run = ++prepRun; btn.dataset.busy = "1"; btn.textContent = "Stop loading folder lists";
+  let done = 0, failed = 0, total = 0;
+  try {
+    note.textContent = "Getting the job list…";
+    const jobs = (await loadAllJobs()).filter((j) => !readSavedTree(j._id));
+    total = jobs.length;
+    if (!total) note.textContent = "Every job already has a saved folder list.";
+    const queue = [...jobs];
+    const worker = async () => {
+      while (queue.length && run === prepRun) {
+        const j = queue.shift();
+        try { await startWalk(j._id, true).promise; } catch { failed++; }
+        done++; if (run === prepRun) note.textContent = `Loading folder lists… ${done} of ${total} jobs${failed ? ` (${failed} could not be read)` : ""}. This can take a while; you can keep working.`;
+      }
+    };
+    await Promise.all([worker(), worker()]);
+    if (total) note.textContent = run === prepRun ? `Done: ${done - failed} of ${total} jobs saved${failed ? `, ${failed} could not be read (run it again to retry them)` : ""}.` : `Stopped after ${done} of ${total} jobs. Run it again to carry on.`;
+    diag("folders", `set-up: ${done - failed} of ${total} jobs saved, ${failed} failed`);
+  } catch (e) { note.textContent = `Could not finish: ${describeError(e)}`; }
+  delete btn.dataset.busy; btn.textContent = "Load folder lists for all jobs (set-up)";
+});
+
 $("signOut").addEventListener("click", () => {
   jobsCache = null; jobsAt = 0;
   purge((k) => k.startsWith("wb_"));

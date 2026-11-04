@@ -118,7 +118,7 @@
 })();
 </script>
 
-<h1>Send to Wunderbuild <span id="ver" data-v="1.75"></span></h1>
+<h1>Send to Wunderbuild <span id="ver" data-v="1.76"></span></h1>
 
 <details id="settings">
   <summary>API settings</summary>
@@ -129,10 +129,12 @@
   <label class="chk"><input type="checkbox" id="fmtPdf" checked> Formatted PDF (rendered by the Cloudflare Worker)</label>
   <label class="chk"><input type="checkbox" id="convPdf" checked> One PDF per email conversation (beta): later emails in the same conversation are added to the same PDF</label>
   <div class="btns">
+    <button type="button" class="sec" id="prepFolders">Load folder lists for all jobs (set-up)</button>
     <button type="button" class="sec" id="clearCache">Clear saved job list and history</button>
     <button type="button" class="sec" id="signOut">Remove my key and saved data</button>
   </div>
   <div id="clearNote" role="status"></div>
+  <div id="prepNote" role="status" class="hint2"></div>
 </details>
 
 <details id="prefs">
@@ -231,8 +233,8 @@
   <button type="button" class="sec" id="brGo" disabled>Attach selected</button>
 </div>
 
-<script src="pdf.js?v=1.75"></script>
-<script src="eml.js?v=1.75"></script>
-<script src="taskpane.js?v=1.75"></script>
+<script src="pdf.js?v=1.76"></script>
+<script src="eml.js?v=1.76"></script>
+<script src="taskpane.js?v=1.76"></script>
 </body>
 </html>
