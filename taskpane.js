@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.86"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.87"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -634,11 +634,11 @@ function tagShape(html, id) { // width / height of the first <img> that points a
   return 0;
 }
 let picLog = []; // what the last PDF did with each picture, for the Troubleshooter
-function assignPictures(html, inl, note) { // Map(cid -> { a, f } the image file that belongs to it)
+function assignPictures(html, inl, note, skip) { // Map(cid -> { a, f } the image file that belongs to it)
   const items = (inl || []).filter((r) => r && r.f), used = new Set(), got = new Map();
   picLog = items.map((r, i) => `file ${i + 1}: ${r.a.name || "(no name)"}, ${Math.round(r.f.bytes.length / 1024)} KB, shape ${(() => { const d = imageSize(r.f.bytes); return d ? d[0] + "x" + d[1] : "unknown"; })()}`);
   const text = String(html || "");
-  const ids = [...new Set([...text.matchAll(/cid:([^"'\s)>]+)/gi)].map((m) => m[1].toLowerCase()))];
+  const ids = [...new Set([...text.matchAll(/cid:([^"'\s)>]+)/gi)].map((m) => m[1].toLowerCase()))].filter((id) => !(skip && skip.has(id)));
   const shapeOf = new Map(); const fileShape = (r) => { if (!shapeOf.has(r)) { const d = imageSize(r.f.bytes); shapeOf.set(r, d && d[0] && d[1] ? d[0] / d[1] : 0); } return shapeOf.get(r); };
   const pick = (id, cands) => { // the candidate whose shape best fits the picture tag; the first one when nothing can tell them apart
     if (cands.length < 2) return { r: cands[0], how: "only one" };
@@ -660,10 +660,30 @@ function assignPictures(html, inl, note) { // Map(cid -> { a, f } the image file
   if (note) note(`${ids.length} picture(s) in the email, ${items.length} image file(s) found, ${guessed.length} placed by list order only${guessed.length ? " (may be in the wrong place)" : ""}`);
   return got;
 }
-function buildCidMap(html, inl, note) {
+// Reads the exported email file for the pictures' own content IDs: the exact link between a place in the email and a picture.
+async function exactPictures(emlBytes, html) { // Map(cid in the html -> { type, bytes }), or an empty map
+  const out = new Map();
+  try {
+    const ids = [...new Set([...String(html || "").matchAll(/cid:([^"'\s)>]+)/gi)].map((m) => m[1].toLowerCase()))];
+    if (!ids.length || !emlBytes) return out;
+    await loadTool("mime.js", () => haveWin("WBMime"));
+    const found = window.WBMime.pictures(emlBytes), byCid = found.byCid;
+    const byBase = new Map(); for (const [k, v] of byCid) { const b = k.split("@")[0]; byBase.set(b, byBase.has(b) ? null : v); } // a short name counts only when it is unique
+    for (const id of ids) {
+      const hit = byCid.get(id) || byBase.get(id.split("@")[0]) || null;
+      if (hit) out.set(id, await shrinkImage(Object.assign({ name: id }, hit)));
+    }
+    diag("pictures", `email file: ${found.count} picture part(s) with a content ID; ${ids.length} picture(s) in the email, ${out.size} matched exactly`);
+  } catch (e) { diag("pictures", `could not read pictures from the email file (${e && e.message})`); }
+  return out;
+}
+function buildCidMap(html, inl, note, exact) { // exact: Map(cid -> { type, bytes }) read from the exported email file, used first
   const items = (inl || []).filter((r) => r && r.f), map = new Map();
   const uri = (r) => `data:${r.f.type};base64,${bytesToB64(r.f.bytes)}`;
-  for (const [id, r] of assignPictures(html, items, note)) map.set(id, uri(r));
+  const skip = new Set();
+  if (exact) for (const [id, f] of exact) { map.set(id, `data:${f.type};base64,${bytesToB64(f.bytes)}`); skip.add(id); }
+  for (const [id, r] of assignPictures(html, items, note, skip)) map.set(id, uri(r));
+  if (exact && exact.size) picLog.unshift(`${exact.size} picture(s) matched exactly from the email file (the rest by name, shape or order)`);
   const nameCount = new Map(); for (const r of items) { const k = (r.a.name || "").toLowerCase(); nameCount.set(k, (nameCount.get(k) || 0) + 1); }
   for (const r of items) { const k = (r.a.name || "").toLowerCase(); if (k && nameCount.get(k) === 1 && !map.has(k)) map.set(k, uri(r)); } // a name shared by several pictures never stands in for one of them
   for (const r of items) if (r.a.id) map.set("id:" + r.a.id, uri(r)); // Outlook on the web names a picture's attachment inside the picture tag
@@ -1557,6 +1577,7 @@ $("send").addEventListener("click", async () => {
       if (built.skipped) problems.push(`${built.skipped} attachment${built.skipped === 1 ? "" : "s"} could not be included in the rebuilt email file`);
     }
 
+    const exactPics = useFmt && !snap.compose && eml && emlB64 ? await exactPictures(eml, bodyHtml) : new Map();
     // Check, right now, whether this email is already in the job (e.g. a colleague saved it first).
     const id = await idPromise;
     // The formatted PDF takes the longest, so it starts now, alongside the check below (unless the panel already knows it is saved).
@@ -1566,7 +1587,7 @@ $("send").addEventListener("click", async () => {
       catch (e) { diag("save", `tools not loaded: ${e.message}`); convOn = false; }
     }
     const renderP = useFmt && !convOn && (snap.compose || !dupFound)
-      ? (async () => renderPdf(buildEmailHtml({ subject, meta, bodyHtml, cid: buildCidMap(bodyHtml, inl, (m) => diag("pictures", m)) })))()
+      ? (async () => renderPdf(buildEmailHtml({ subject, meta, bodyHtml, cid: buildCidMap(bodyHtml, inl, (m) => diag("pictures", m), exactPics) })))()
       : Promise.resolve(null);
     renderP.catch(() => {}); // a failure is reported where the result is used
     let existing = [];
@@ -1613,7 +1634,7 @@ $("send").addEventListener("click", async () => {
       try {
         setStatus("Rendering formatted PDF…", "busy");
         pdf = await renderP;
-        if (!pdf) pdf = await renderPdf(buildEmailHtml({ subject, meta, bodyHtml, cid: buildCidMap(bodyHtml, inl, (m) => diag("pictures", m)) }));
+        if (!pdf) pdf = await renderPdf(buildEmailHtml({ subject, meta, bodyHtml, cid: buildCidMap(bodyHtml, inl, (m) => diag("pictures", m), exactPics) }));
       } catch (e) { problems.push(`formatted PDF unavailable (${e.message}), so a basic text PDF was saved instead`); }
     }
     let newPdfOk = false, newEmlOk = false, emlDoc = null, pdfDoc = null;
