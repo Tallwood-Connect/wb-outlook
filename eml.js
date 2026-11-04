@@ -56,7 +56,7 @@
     if (html && inl.length) { // point the body's cid: references at the inline images we embed
       html = html.replace(/cid:([^"'\s)>]+)/gi, (match, id) => {
         const key = id.split("@")[0].toLowerCase();
-        const hit = inl.find((a) => String(a.name || "").toLowerCase() === key);
+        const hit = inl.find((a) => (a.cids || []).indexOf(id.toLowerCase()) >= 0) || inl.find((a) => String(a.name || "").toLowerCase() === key);
         return hit ? `cid:${hit.cid}` : match;
       });
     }

@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.84"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.85"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -616,9 +616,8 @@ function tagShape(html, id) { // width / height of the first <img> that points a
   }
   return 0;
 }
-function buildCidMap(html, inl, note) {
-  const items = (inl || []).filter((r) => r && r.f), map = new Map(), used = new Set();
-  const uri = (r) => `data:${r.f.type};base64,${bytesToB64(r.f.bytes)}`;
+function assignPictures(html, inl, note) { // Map(cid -> { a, f } the image file that belongs to it)
+  const items = (inl || []).filter((r) => r && r.f), used = new Set(), got = new Map();
   const text = String(html || "");
   const ids = [...new Set([...text.matchAll(/cid:([^"'\s)>]+)/gi)].map((m) => m[1].toLowerCase()))];
   const shapeOf = new Map(); const fileShape = (r) => { if (!shapeOf.has(r)) { const d = imageSize(r.f.bytes); shapeOf.set(r, d && d[0] && d[1] ? d[0] / d[1] : 0); } return shapeOf.get(r); };
@@ -636,12 +635,18 @@ function buildCidMap(html, inl, note) {
   for (const id of ids) {
     const base = id.split("@")[0];
     const named = items.filter((x) => !used.has(x) && (x.a.name || "").toLowerCase() === base);
-    if (named.length) { const p = pick(id, named); used.add(p.r); map.set(id, uri(p.r)); if (named.length > 1 && p.how === "order") guessed.push(id); } else left.push(id);
+    if (named.length) { const p = pick(id, named); used.add(p.r); got.set(id, p.r); if (named.length > 1 && p.how === "order") guessed.push(id); } else left.push(id);
   }
-  for (const id of left) { const c = items.filter((x) => !used.has(x)); if (!c.length) continue; const p = pick(id, c); used.add(p.r); map.set(id, uri(p.r)); if (p.how === "order") guessed.push(id); }
+  for (const id of left) { const c = items.filter((x) => !used.has(x)); if (!c.length) continue; const p = pick(id, c); used.add(p.r); got.set(id, p.r); if (p.how === "order") guessed.push(id); }
+  if (note) note(`${ids.length} picture(s) in the email, ${items.length} image file(s) found, ${guessed.length} placed by list order only${guessed.length ? " (may be in the wrong place)" : ""}`);
+  return got;
+}
+function buildCidMap(html, inl, note) {
+  const items = (inl || []).filter((r) => r && r.f), map = new Map();
+  const uri = (r) => `data:${r.f.type};base64,${bytesToB64(r.f.bytes)}`;
+  for (const [id, r] of assignPictures(html, items, note)) map.set(id, uri(r));
   for (const r of items) { const k = (r.a.name || "").toLowerCase(); if (k && !map.has(k)) map.set(k, uri(r)); }
   for (const r of items) if (r.a.id) map.set("id:" + r.a.id, uri(r)); // Outlook on the web names a picture's attachment inside the picture tag
-  if (note) note(`${ids.length} picture(s) in the email, ${items.length} image file(s) found, ${guessed.length} placed by list order only${guessed.length ? " (may be in the wrong place)" : ""}`);
   return map;
 }
 
@@ -1449,12 +1454,15 @@ function lockUI(on) {
 
 // Rebuilds an .eml from a draft (Outlook cannot export a draft). Cloud-linked attachments cannot be included.
 async function buildDraftEml(snap, bodyHtml, bodyText, readAtt) {
-  const parts = []; let skipped = 0;
+  const parts = [], reads = []; let skipped = 0;
   for (const a of snap.attachments) {
     const r = await readAtt(a);
-    if (r.f) parts.push({ name: r.f.name || a.name, type: r.f.type, bytes: r.f.bytes, isInline: a.isInline });
+    if (r.f) { const p = { name: r.f.name || a.name, type: r.f.type, bytes: r.f.bytes, isInline: a.isInline }; parts.push(p); reads.push({ a, f: r.f, p }); }
     else skipped++;
   }
+  try { // which picture each cid: reference in the body really points at (several pictures can share one file name)
+    for (const [id, r] of assignPictures(bodyHtml, reads.filter((x) => x.p.isInline && String(x.p.type || "").startsWith("image/")))) (r.p.cids = r.p.cids || []).push(id);
+  } catch { /* the eml falls back to matching by name */ }
   return { bytes: buildEml({ id: snap.wbId, from: snap.from, to: snap.to, cc: snap.cc, bcc: snap.bcc, subject: snap.subject,
     date: snap.compose ? new Date() : snap.date, bodyHtml, bodyText, attachments: parts }), skipped };
 }
