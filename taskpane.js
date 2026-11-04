@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.85"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.86"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -73,13 +73,27 @@ function refreshSend() {
 }
 
 // Wunderbuild limits how fast requests can be made, so at most 4 run at once, and a "429 Too Many Requests" reply
-// is retried after a short wait (nothing has been done by the server when it says that, so retrying is safe).
+// is retried (twice at most) after at least 5 seconds (nothing has been done by the server when it says that, so retrying is safe).
 // Background work (listing every folder of a job, indexing file names) goes in the "low" line, so what the person is
 // waiting for (checking whether an email is saved, picking a folder, saving) is never held up behind it.
-let apiActive = 0; const apiQueue = [], apiLowQueue = [];
+// Background work runs at most 2 at a time, and everything in the background line stops for 60 seconds after any
+// "429 Too Many Requests", so a long folder walk can no longer use up Wunderbuild's limit for the person's own save.
+let apiActive = 0, apiLowActive = 0, apiLowPause = 0, apiPumpTimer = null; const apiQueue = [], apiLowQueue = [];
 let apiLast = { wait: 0, took: 0 }; // timing of the latest call, for the Troubleshooter
-const apiSlot = (low) => new Promise((go) => { if (apiActive < 4) { apiActive++; go(); } else (low ? apiLowQueue : apiQueue).push(go); });
-const apiFree = () => { const next = apiQueue.shift() || apiLowQueue.shift(); if (next) next(); else apiActive--; };
+function apiPump() {
+  while (apiActive < 4) {
+    let next = apiQueue.shift();
+    if (!next) {
+      if (apiLowActive >= 2 || !apiLowQueue.length) break;
+      const left = apiLowPause - Date.now();
+      if (left > 0) { clearTimeout(apiPumpTimer); apiPumpTimer = setTimeout(apiPump, left + 25); break; }
+      next = apiLowQueue.shift();
+    }
+    next();
+  }
+}
+const apiSlot = (low) => new Promise((go) => { (low ? apiLowQueue : apiQueue).push(() => { apiActive++; if (low) apiLowActive++; go(); }); apiPump(); });
+const apiFree = (low) => { apiActive--; if (low) apiLowActive--; apiPump(); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const plainError = (t) => String(t || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
 async function api(path, opts = {}) {
@@ -100,14 +114,17 @@ async function api(path, opts = {}) {
     } catch (err) {
       diag("network", `${opts.method || "GET"} ${path.split("?")[0]} failed after ${Date.now() - began} ms (${err && err.message})`);
       throw new Error(`Request to ${base()}${path.split("?")[0]} was blocked or failed (${err && err.message}). Check the API base URL and the proxy settings.`);
-    } finally { apiFree(); }
+    } finally { apiFree(low); }
     apiLast = { wait: waited, took: Date.now() - began };
     if (waited > 1500 || apiLast.took > 2500) diag("slow", `${opts.method || "GET"} ${path.split("?")[0]}: waited ${waited} ms in line, answered in ${apiLast.took} ms`);
     if (!res.ok) diag("api", `${opts.method || "GET"} ${path.split("?")[0]} -> ${res.status} after ${Date.now() - began} ms${attempt ? ` (try ${attempt + 1})` : ""}`);
-    if (res.status === 429 && attempt < 5) {
-      const ra = Number(res.headers && res.headers.get && res.headers.get("retry-after"));
-      await sleep(Math.min(10000, (ra > 0 ? ra * 1000 : 1000 * 2 ** attempt) + Math.random() * 400));
-      continue;
+    if (res.status === 429) {
+      apiLowPause = Math.max(apiLowPause, Date.now() + 60000); // background work waits a minute
+      if (attempt < 2) { // at most two more tries, never sooner than 5 seconds
+        const ra = Number(res.headers && res.headers.get && res.headers.get("retry-after"));
+        await sleep(Math.min(30000, Math.max(5000, ra > 0 ? ra * 1000 : 0) + Math.random() * 400));
+        continue;
+      }
     }
     if (!res.ok) throw new Error(res.status === 429 ? "Wunderbuild is busy (too many requests). Wait a few seconds and try again." : `Wunderbuild returned ${res.status}: ${plainError(await res.text())}`);
     return res.status === 204 ? null : res.json();
@@ -616,8 +633,10 @@ function tagShape(html, id) { // width / height of the first <img> that points a
   }
   return 0;
 }
+let picLog = []; // what the last PDF did with each picture, for the Troubleshooter
 function assignPictures(html, inl, note) { // Map(cid -> { a, f } the image file that belongs to it)
   const items = (inl || []).filter((r) => r && r.f), used = new Set(), got = new Map();
+  picLog = items.map((r, i) => `file ${i + 1}: ${r.a.name || "(no name)"}, ${Math.round(r.f.bytes.length / 1024)} KB, shape ${(() => { const d = imageSize(r.f.bytes); return d ? d[0] + "x" + d[1] : "unknown"; })()}`);
   const text = String(html || "");
   const ids = [...new Set([...text.matchAll(/cid:([^"'\s)>]+)/gi)].map((m) => m[1].toLowerCase()))];
   const shapeOf = new Map(); const fileShape = (r) => { if (!shapeOf.has(r)) { const d = imageSize(r.f.bytes); shapeOf.set(r, d && d[0] && d[1] ? d[0] / d[1] : 0); } return shapeOf.get(r); };
@@ -635,9 +654,9 @@ function assignPictures(html, inl, note) { // Map(cid -> { a, f } the image file
   for (const id of ids) {
     const base = id.split("@")[0];
     const named = items.filter((x) => !used.has(x) && (x.a.name || "").toLowerCase() === base);
-    if (named.length) { const p = pick(id, named); used.add(p.r); got.set(id, p.r); if (named.length > 1 && p.how === "order") guessed.push(id); } else left.push(id);
+    if (named.length) { const p = pick(id, named); used.add(p.r); got.set(id, p.r); picLog.push(`picture ${id.slice(0, 40)} (tag shape ${tagShape(text, id).toFixed(2)}) -> file ${items.indexOf(p.r) + 1} by name, ${p.how}`); if (named.length > 1 && p.how === "order") guessed.push(id); } else left.push(id);
   }
-  for (const id of left) { const c = items.filter((x) => !used.has(x)); if (!c.length) continue; const p = pick(id, c); used.add(p.r); got.set(id, p.r); if (p.how === "order") guessed.push(id); }
+  for (const id of left) { const c = items.filter((x) => !used.has(x)); if (!c.length) { picLog.push(`picture ${id.slice(0, 40)} -> no file left, shown as "picture not included"`); continue; } const p = pick(id, c); used.add(p.r); got.set(id, p.r); picLog.push(`picture ${id.slice(0, 40)} (tag shape ${tagShape(text, id).toFixed(2)}) -> file ${items.indexOf(p.r) + 1}, ${p.how}`); if (p.how === "order") guessed.push(id); }
   if (note) note(`${ids.length} picture(s) in the email, ${items.length} image file(s) found, ${guessed.length} placed by list order only${guessed.length ? " (may be in the wrong place)" : ""}`);
   return got;
 }
@@ -645,7 +664,8 @@ function buildCidMap(html, inl, note) {
   const items = (inl || []).filter((r) => r && r.f), map = new Map();
   const uri = (r) => `data:${r.f.type};base64,${bytesToB64(r.f.bytes)}`;
   for (const [id, r] of assignPictures(html, items, note)) map.set(id, uri(r));
-  for (const r of items) { const k = (r.a.name || "").toLowerCase(); if (k && !map.has(k)) map.set(k, uri(r)); }
+  const nameCount = new Map(); for (const r of items) { const k = (r.a.name || "").toLowerCase(); nameCount.set(k, (nameCount.get(k) || 0) + 1); }
+  for (const r of items) { const k = (r.a.name || "").toLowerCase(); if (k && nameCount.get(k) === 1 && !map.has(k)) map.set(k, uri(r)); } // a name shared by several pictures never stands in for one of them
   for (const r of items) if (r.a.id) map.set("id:" + r.a.id, uri(r)); // Outlook on the web names a picture's attachment inside the picture tag
   return map;
 }
@@ -941,8 +961,11 @@ function prepBody(bodyHtml, cid, noStyle) { // the email's own HTML made ready f
   const NOTE = '<span style="color:#888;font-size:11px">[picture not included]</span>';
   const attr = (tag, name) => { const m = new RegExp("\\s" + name + "\\s*=\\s*(\"([^\"]*)\"|'([^']*)')", "i").exec(tag); return m ? (m[2] != null ? m[2] : m[3]) : null; };
   const noAttr = (tag, name) => tag.replace(new RegExp("\\s" + name + "\\s*=\\s*(\"[^\"]*\"|'[^']*')", "ig"), "");
+  const kinds = {};
+  const kind = (k) => { kinds[k] = (kinds[k] || 0) + 1; };
   body = body.replace(/<img\b[^>]*>/gi, (tag) => {
     const src = attr(tag, "src") || "", orig = attr(tag, "originalsrc") || "", dc = attr(tag, "data-custom");
+    kind(/^data:/i.test(src) ? (/^data:image\/gif;base64,[A-Za-z0-9+\/=]{0,200}$/i.test(src) ? "src placeholder" : "src data picture") : /^https?:/i.test(src) ? "src web address" : /^cid:/i.test(src) ? "src cid" : "src other" ); if (orig) kind("has originalsrc"); if (dc) kind("has data-custom");
     let use = /^data:image\/(?!gif;base64,[A-Za-z0-9+\/=]{0,200}$)/i.test(src) ? src : ""; // a real picture is already there
     if (!use && /^data:image\//i.test(orig)) use = orig;
     if (!use && dc && cid) { let id = dc; try { id = decodeURIComponent(dc); } catch { /* use as is */ } use = cid.get("id:" + id) || cid.get("id:" + dc) || ""; }
@@ -950,6 +973,7 @@ function prepBody(bodyHtml, cid, noStyle) { // the email's own HTML made ready f
     if (!use) return NOTE; // placeholder, unresolved cid:, or nothing usable
     return noAttr(noAttr(noAttr(noAttr(tag, "src"), "originalsrc"), "data-custom"), "srcset").replace(/<img\b/i, `<img src="${use}"`);
   });
+  try { if (Object.keys(kinds).length) picLog.push("picture tags in the email: " + Object.entries(kinds).map(([k, v]) => `${v} x ${k}`).join(", ")); } catch { /* log only */ }
   // Pictures set as backgrounds or left without a source cannot be shown either
   body = body.replace(/<img\b[^>]*\bsrc\s*=\s*["']?cid:[^>]*>/gi, NOTE);
   // Runs of empty lines and paragraphs make big blank spaces: keep one.
@@ -1835,6 +1859,7 @@ async function buildReport() {
   add(`Job: ${job ? `${fullJobNo(job)} ${job.name} (${job._id})` : "none chosen"}${jobAuto ? " (filled in automatically)" : ""}`);
   add(`Folders: ${$("folder").options.length} listed | email folder: ${$("folder").selectedOptions[0] ? $("folder").selectedOptions[0].text : "-"} | attachment folder: ${$("attFolder").selectedOptions[0] ? $("attFolder").selectedOptions[0].text : "-"}`);
   add(`Folder list failed: ${foldersFailed} | still loading: ${foldersPending} | Correspondence missing: ${corrMissing}`);
+  { const out = (picLog || []); if (out.length) { add(""); add("== PICTURES IN THE LAST PDF =="); for (const l of out.slice(0, 40)) add(l); } }
   add(`Requests in progress: ${apiActive} | waiting: ${apiQueue.length} urgent + ${apiLowQueue.length} background`);
   add(`Already saved: ${dupFound}${savedAt ? ` (${savedAt.toLocaleString("en-AU")})` : ""}${repliedOnly ? " - because a reply was saved" : ""} | saving now: ${sending}`);
   add(`File name box: ${$("name").value} | edited by hand: ${nameEdited} | attachment folders: ${$("attMode").checked ? "individual" : "one folder"}`);
