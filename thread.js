@@ -54,12 +54,26 @@
     const s = /(?:^|\n)\s*(?:Sent|Date):\s*([^\n]+)/i.exec(t);
     if (!from) { // Gmail / Apple style: "On Fri, 30 Oct 2026 at 11:05, Mark Ellis <mark@x.com> wrote:"
       m = /(?:^|\n)\s*On\s+(.{6,200}?)\s+wrote:/i.exec(t);
-      if (m) { const em = /([^<,]*)<([^>]+)>/.exec(m[1]); from = em ? `${em[1].trim()} <${em[2]}>` : m[1]; at = parseWhen(m[1]); }
+      if (m) { const a = splitAttribution(m[1]); from = a.addr ? `${a.who} <${a.addr}>` : a.who || m[1]; at = parseWhen(a.when); }
     } else if (s) at = parseWhen(s[1]);
     return from ? { from: personKey(from), at } : null;
   }
+  // "Fri, Oct 30, 2026 at 1:46 PM Tallwood | Jason <jason@x.com>" -> { when: "Fri, Oct 30, 2026 at 1:46 PM", who: "Tallwood | Jason", addr: "jason@x.com" }
+  // (the date comes first, then the sender; Gmail, Apple Mail and Outlook all write it this way, with or without commas)
+  function splitAttribution(str) {
+    let s = String(str || "").replace(/\s+/g, " ").trim(), addr = "";
+    const em = /<([^<>]+@[^<>]+)>\s*$/.exec(s); if (em) { addr = em[1].trim(); s = s.slice(0, em.index).trim(); }
+    let when = "", who = s;
+    const t = /^(.*?\b\d{1,2}[:.]\d{2}(?::\d{2})?(?:\s*[ap]\.?m\b\.?)?)(?=[\s,]|$)\s*,?\s*(.*)$/i.exec(s);
+    if (t) { when = t[1]; who = t[2]; }
+    else { const d = /^(.*?\b(?:19|20)\d{2})(?=[\s,]|$)\s*,?\s*(?:at\s+)?(.*)$/i.exec(s); if (d) { when = d[1]; who = d[2]; } }
+    who = who.replace(/^[\s,"'-]+|[\s,"']+$/g, "");
+    return { when, who, addr };
+  }
   function parseWhen(str) {
-    const c = String(str || "").replace(/\b(mon|tue|wed|thu|fri|sat|sun)[a-z]*,?\s*/ig, "").replace(/\s+at\s+/i, " ").replace(/,/g, " ");
+    let c = String(str || "").replace(/\b(mon|tue|wed|thu|fri|sat|sun)[a-z]*,?\s*/ig, "").replace(/\s+at\s+/i, " ").replace(/,/g, " ").replace(/\s+/g, " ").trim();
+    c = c.replace(/^(\d{1,2})[\/.](\d{1,2})[\/.](\d{4})\b/, "$2/$1/$3"); // day/month/year as written in Australia
+    if (!/\b(19|20)\d{2}\b/.test(c)) return null; // no year: never guess (a bare "Oct 30" would become 2001)
     const d = new Date(c); return isNaN(d) ? null : d.toISOString();
   }
   function personKey(s) { // an address if there is one, otherwise the name
@@ -261,8 +275,7 @@
       if (!el.parentNode || (el.tagName !== "DIV" && el.tagName !== "P" && !el.classList.contains("gmail_attr"))) continue;
       const t = (el.textContent || "").replace(/\s+/g, " ").trim();
       const m = /^On (.{6,200}?) wrote:$/i.exec(t); if (!m || el.querySelector("div,p")) continue;
-      const em = /([^<,]*)<([^>]+)>\s*$/.exec(m[1]); const nm = em ? em[1].replace(/^.*?\d{4}[^,]*,?\s*(at\s+[\d:. apm]+,?)?\s*/i, "").trim() || em[2] : m[1];
-      const iso = parseWhen(m[1].replace(/,?\s*[^,]*<[^>]*>\s*$/, ""));
+      const a = splitAttribution(m[1]); const nm = a.who || a.addr || m[1]; const iso = parseWhen(a.when);
       const node = mk({ from: nm, dir: me.some((x) => x && m[1].toLowerCase().indexOf(x) >= 0) ? "sent" : "received", when: iso ? fmtWhen(iso) : "" });
       el.parentNode.replaceChild(node, el);
     }
