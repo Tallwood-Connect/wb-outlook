@@ -10,6 +10,7 @@
   :root{--ink:#0f2438;--muted:#5a6b7a;--line:#d3dce4;--bg:#fff;--soft:#f1f5f8;--brand:#2b976f;--accent:#1d7a57;--bad:#a4262c;--ok:#1d7a57;--navy:#0f2438}
   @media (prefers-color-scheme:dark){:root{--ink:#e6edf3;--muted:#98a9b8;--line:#2a3f54;--bg:#0b1a28;--soft:#12283b;--brand:#2b976f;--accent:#4fc59a;--bad:#f1707b;--ok:#4fc59a;--navy:#08141f}}
   *{box-sizing:border-box}
+  body.dev::after{content:"";position:fixed;inset:0;border:3px dashed #D32F2F;pointer-events:none;z-index:9999} /* the dev copy only (see the script below) */
   body{margin:0;padding:14px;font:14px/1.45 "Segoe UI",system-ui,sans-serif;color:var(--ink);background:var(--bg)}
   h1{font-size:16px;margin:-14px -14px 14px;padding:12px 14px;background:var(--navy);color:#fff;border-bottom:3px solid var(--brand)}
   #ver{font-size:12px;font-weight:400;color:#9fc9b8;margin-left:6px}
@@ -111,12 +112,13 @@
 <script>
 (function () { // runs even in very old Outlook engines: plain old JavaScript only
   var ok = true;
+  try { if (/\/dev\//.test(location.pathname)) document.body.className += " dev"; } catch (e) { /* no outline */ }
   try { ok = typeof Promise !== "undefined" && typeof fetch !== "undefined" && typeof Uint8Array !== "undefined"; new Function("return async function () {}; "); new Function("var a = {b: 1}; return {...a};"); } catch (e) { ok = false; }
   if (!ok) { document.getElementById("oldOutlook").hidden = false; window.__wbTooOld = true; }
 })();
 </script>
 
-<h1>Send to Wunderbuild <span id="ver" data-v="1.71"></span></h1>
+<h1>Send to Wunderbuild <span id="ver" data-v="1.72"></span></h1>
 
 <details id="settings">
   <summary>API settings</summary>
@@ -229,8 +231,8 @@
   <button type="button" class="sec" id="brGo" disabled>Attach selected</button>
 </div>
 
-<script src="pdf.js?v=1.71"></script>
-<script src="eml.js?v=1.71"></script>
-<script src="taskpane.js?v=1.71"></script>
+<script src="pdf.js?v=1.72"></script>
+<script src="eml.js?v=1.72"></script>
+<script src="taskpane.js?v=1.72"></script>
 </body>
 </html>
