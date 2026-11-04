@@ -6,6 +6,7 @@ on:
   push:
     paths:
       - manifest.xml
+      - manifest-dev.xml
       - MANIFEST-SHA256.txt
       - MANIFEST-VERSIONS.md
       - .github/workflows/manifest-check.yml
@@ -33,4 +34,17 @@ jobs:
           grep -q 'launchevent.js?v=1.28' manifest.xml || { echo "::error::launchevent.js ?v=1.28 URL missing"; fail=1; }
           grep -q '<Permissions>ReadWriteItem</Permissions>' manifest.xml || { echo "::error::Permissions changed from ReadWriteItem (needs Jason's written approval)"; fail=1; }
           grep -q '<Id>aabbef90-b8c4-49fb-81d6-4b3f273b47e3</Id>' manifest.xml || { echo "::error::add-in Id changed (it must never change)"; fail=1; }
+          exit $fail
+      - name: Check the dev manifest
+        run: |
+          set -u
+          fail=0
+          f=manifest-dev.xml
+          id_dev=$(grep -o '<Id>[^<]*' $f | sed 's/<Id>//')
+          id_live=$(grep -o '<Id>[^<]*' manifest.xml | sed 's/<Id>//')
+          [ "$id_dev" != "$id_live" ] || { echo "::error::dev manifest has the same Id as the live one"; fail=1; }
+          # No launch events or runtime: both add-ins would otherwise handle Archicad emails and send prompts
+          if grep -q 'LaunchEvent\|<Runtime\|FunctionFile\|launchevent' $f; then echo "::error::dev manifest must not contain launch events, a runtime or launchevent URLs"; fail=1; fi
+          grep -q '<Permissions>ReadWriteItem</Permissions>' $f || { echo "::error::dev manifest permissions changed from ReadWriteItem"; fail=1; }
+          if grep -o 'wb-outlook/[^"]*' $f | grep -v '^wb-outlook/dev/' | grep -v '^wb-outlook/assets/' | grep -q .; then echo "::error::dev manifest points outside /dev/ (only assets may be shared)"; fail=1; fi
           exit $fail
