@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.76"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.77"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const missingEls = {}; // a page kept from an older version may lack newer controls: they get a harmless stand-in instead of crashing the panel
 const $ = (id) => document.getElementById(id) || (missingEls[id] || (missingEls[id] = document.createElement("div")));
@@ -137,7 +137,7 @@ function getConvRecord(convId) {
 // Drops conversation records older than 90 days, and the oldest ones beyond 500.
 function pruneConv() {
   const recs = [];
-  for (const k of store.keys().filter((k) => k.startsWith("wb_sent_"))) { // sent-copy memory: same 90 days
+  for (const k of store.keys().filter((k) => k.startsWith("wb_sent_") || k.startsWith(SAVED_PREFIX))) { // sent-copy memory: same 90 days
     try { const r = JSON.parse(store.get(k)); if (!(r && r.at && Date.now() - r.at < CONV_MAX_AGE)) store.remove(k); } catch { store.remove(k); }
   }
   for (const k of store.keys().filter((k) => k.startsWith(CONV_PREFIX))) {
@@ -1101,6 +1101,17 @@ async function findExisting(forJob, destFolderId, id, corrOnly) {
   return hits;
 }
 
+// Remembers on this computer which emails are already saved, so opening one again shows it at once (confirmed quietly afterwards).
+// "Not saved" answers are only kept for this session (10 minutes), since someone else could save the email meanwhile.
+const SAVED_PREFIX = "wb_saved_", notSavedAt = new Map();
+const savedMarkKey = (id, jobId) => SAVED_PREFIX + id + "_" + jobId;
+function readSavedMark(id, jobId) {
+  try { const r = JSON.parse(store.get(savedMarkKey(id, jobId)) || "null"); if (r && r.at && Date.now() - r.at < CONV_MAX_AGE) return r; } catch { /* ignore */ }
+  return null;
+}
+function rememberSaved(id, jobId, savedMs) { notSavedAt.delete(id + "_" + jobId); store.set(savedMarkKey(id, jobId), JSON.stringify({ at: Date.now(), saved: savedMs || Date.now() })); }
+function forgetSaved(id, jobId) { store.remove(savedMarkKey(id, jobId)); }
+
 let dupRun = 0, justSaved = null; // justSaved = id of the job this email was just saved to
 function resetDup() { dupRun++; dupFound = false; repliedOnly = false; savedAt = null; attOpen = false; $("dupNote").className = ""; $("dupNote").textContent = ""; }
 async function checkDuplicate() {
@@ -1109,12 +1120,28 @@ async function checkDuplicate() {
   if (!forJob || !item || justSaved === forJob._id) return;
   if (isCompose() && !item.savedBefore) return; // a brand new email cannot already be saved, so nothing to look for
   // no "already saved" note straight after saving it
-  note.className = "busy"; note.textContent = "Checking whether this email is already saved…";
+  const id = await emailId(item);
+  if (run !== dupRun || job !== forJob) return;
+  const mem = readSavedMark(id, forJob._id);
+  const skipScan = !mem && notSavedAt.get(id + "_" + forJob._id) > Date.now() - 10 * 60 * 1000; // looked a moment ago: not saved
+  if (mem) { // saved earlier on this computer: show it straight away, confirm quietly below
+    dupFound = true; savedAt = mem.saved ? new Date(mem.saved) : null;
+    for (const row of $("attList").children) row.children[0].checked = false;
+    if (isCompose()) note.textContent = "This email was already saved to Wunderbuild. Save and send will update the saved copy, then send it.";
+    refreshSend();
+  } else if (!skipScan) { note.className = "busy"; note.textContent = "Checking whether this email is already saved…"; }
   try {
-    const found = await findExisting(forJob, $("folder").value, await emailId(item), true);
+    const found = skipScan ? [] : await findExisting(forJob, $("folder").value, id, true);
     if (run !== dupRun || job !== forJob) return; // something changed meanwhile
     note.className = ""; note.textContent = "";
     let both = found.some(isEmlDoc); // the .eml carries the reference; its PDF was saved with it
+    if (!skipScan) {
+      if (both) rememberSaved(id, forJob._id, found.map(docSavedAt).filter(Boolean).sort((a, b) => a - b)[0] ? found.map(docSavedAt).filter(Boolean).sort((a, b) => a - b)[0].getTime() : (mem && mem.saved));
+      else {
+        if (mem) { forgetSaved(id, forJob._id); dupFound = false; savedAt = null; renderAttachments(); } // it is no longer in Wunderbuild
+        if (!found.length) notSavedAt.set(id + "_" + forJob._id, Date.now());
+      }
+    }
     if (found.length) {
       dupFound = both; // received emails show a green "Sent to Wunderbuild" button instead of a message
       if (both) {
@@ -1129,7 +1156,7 @@ async function checkDuplicate() {
       const r = getReplyRecord(item.conversationId);
       if (r && r.jobId === forJob._id && item.date && item.date.getTime() <= r.at) { dupFound = true; savedAt = new Date(r.at); repliedOnly = true; for (const row of $("attList").children) row.children[0].checked = false; found.length || (note.textContent = ""); }
     }
-  } catch (e) { if (run === dupRun) { note.className = ""; note.textContent = `Could not check for an existing copy: ${e.message}`; } }
+  } catch (e) { if (run === dupRun) { note.className = ""; note.textContent = mem ? "" : `Could not check for an existing copy: ${e.message}`; } }
   if (run === dupRun) refreshSend();
 }
 
@@ -1282,7 +1309,7 @@ async function ensureOutlookFolder(parentId, jobId = job._id) {
 
 $("clearCache").addEventListener("click", () => {
   jobsCache = null; jobsAt = 0;
-  purge((k) => k === JOBS_KEY || k === "wb_job" || k.startsWith("wb_ftree_") || k.startsWith("wb_sent_") || k.startsWith(CONV_PREFIX) || k.startsWith(CPDF_PREFIX));
+  purge((k) => k === JOBS_KEY || k === "wb_job" || k.startsWith("wb_ftree_") || k.startsWith("wb_sent_") || k.startsWith(SAVED_PREFIX) || k.startsWith(CONV_PREFIX) || k.startsWith(CPDF_PREFIX));
   $("clearNote").textContent = "Saved job list and conversation history cleared.";
 });
 // Set-up helper: reads the folder list of every job once and keeps it on this computer, so later jobs open at once.
@@ -1531,6 +1558,7 @@ $("send").addEventListener("click", async () => {
     // Remember which job this conversation was filed to (kept on this computer only).
     if (snap.compose && snap.wbId) store.set(sentKey(snap.subject, snap.to), JSON.stringify({ at: Date.now(), id: snap.wbId })); // so the sent copy is recognised as saved
     saveConvRecord(convId, jobAtSend);
+    if (id) rememberSaved(id, jobAtSend._id);
     if (snap.compose) saveReplyRecord(convId, jobAtSend);
     if (snap.compose && pdfDoc && !convUsed) snap.pdfRef = `${jobAtSend._id}:${pdfDoc._id}`; // so the next save of this draft can replace this PDF
     await markSaved(snap);
