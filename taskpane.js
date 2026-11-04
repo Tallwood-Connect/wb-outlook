@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.73"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.74"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const missingEls = {}; // a page kept from an older version may lack newer controls: they get a harmless stand-in instead of crashing the panel
 const $ = (id) => document.getElementById(id) || (missingEls[id] || (missingEls[id] = document.createElement("div")));
@@ -1699,6 +1699,31 @@ async function buildReport() {
     else add("Folders of the chosen job: skipped (no job chosen)");
     add(await timedCheck("PDF service", async () => { const b = await renderPdf("<p>test</p>"); return `${b.length} bytes`; }));
   }
+
+  add(); add("== SPEED TEST (where the time goes) ==");
+  try {
+    const root = base().replace(/\/api\/?$/, "");
+    const one = async (url, init) => {
+      const t0 = performance.now();
+      try { const r = await fetch(url, { ...init, signal: AbortSignal.timeout(20000) }); await r.text(); return `${Math.round(performance.now() - t0)} ms (HTTP ${r.status})`; }
+      catch (e) { return `FAILED after ${Math.round(performance.now() - t0)} ms (${describeError(e)})`; }
+    };
+    const stamp = () => `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+    add("A. Worker only, no key, no Wunderbuild (HTTP 401 is the expected answer here):");
+    for (let i = 1; i <= 3; i++) add(`   try ${i}: ${await one(`${root}/ping?t=${stamp()}`)}`);
+    const par = performance.now();
+    const four = await Promise.all([1, 2, 3, 4].map(() => one(`${root}/ping?t=${stamp()}`)));
+    add(`   4 at the same time: ${four.join(" | ")} (all done in ${Math.round(performance.now() - par)} ms)`);
+    if (key) {
+      add("B. Through the Worker to Wunderbuild, with the key (one job):");
+      for (let i = 1; i <= 3; i++) add(`   try ${i}: ${await one(`${base()}/jobs?page=1&limit=1&t=${stamp()}`, { headers: { "x-api-key": key, "Content-Type": "application/json" } })}`);
+    }
+    try {
+      const es = performance.getEntriesByType("resource").filter((e) => e.name.indexOf("/ping") > -1);
+      const e = es[es.length - 1];
+      if (e) add(`Connection type seen by the browser: ${e.nextHopProtocol || "not reported"} | last ping took ${Math.round(e.duration)} ms in total`);
+    } catch { /* ignore */ }
+  } catch (e) { add(`Speed test could not run: ${describeError(e)}`); }
 
   add(); add("== RECENT ACTIVITY (oldest first) ==");
   if (!diagLog.length) add("Nothing recorded yet.");
