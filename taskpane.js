@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.70"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.71"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const missingEls = {}; // a page kept from an older version may lack newer controls: they get a harmless stand-in instead of crashing the panel
 const $ = (id) => document.getElementById(id) || (missingEls[id] || (missingEls[id] = document.createElement("div")));
@@ -1090,7 +1090,7 @@ let dupRun = 0, justSaved = null; // justSaved = id of the job this email was ju
 function resetDup() { dupRun++; dupFound = false; repliedOnly = false; savedAt = null; attOpen = false; $("dupNote").className = ""; $("dupNote").textContent = ""; }
 async function checkDuplicate() {
   resetDup(); refreshSend();
-  const run = dupRun, forJob = job, item = cur, note = $("dupNote"), ep = itemEpoch;
+  const run = dupRun, forJob = job, item = cur, note = $("dupNote");
   if (!forJob || !item || justSaved === forJob._id) return;
   if (isCompose() && !item.savedBefore) return; // a brand new email cannot already be saved, so nothing to look for
   // no "already saved" note straight after saving it
@@ -1101,7 +1101,6 @@ async function checkDuplicate() {
     note.className = ""; note.textContent = "";
     let both = found.some(isEmlDoc); // the .eml carries the reference; its PDF was saved with it
     if (found.length) {
-      if (both) tagSaved(ep); // an email found already saved gets the category too
       dupFound = both; // received emails show a green "Sent to Wunderbuild" button instead of a message
       if (both) {
         savedAt = found.map(docSavedAt).filter(Boolean).sort((a, b) => a - b)[0] || null;
@@ -1324,7 +1323,6 @@ $("send").addEventListener("click", async () => {
   lastResult = null;
   sending = true; lockUI(true); $("send").disabled = true;
   const saveStart = Date.now();
-  const tagEpoch = itemEpoch; // so the Outlook category only goes on the email that was saved
   diag("save", `started (${isCompose() ? "email being written" : "received email"})`);
   let convLock = null; // held while a conversation PDF is being replaced
   try {
@@ -1492,7 +1490,6 @@ $("send").addEventListener("click", async () => {
     if (snap.compose) saveReplyRecord(convId, jobAtSend);
     if (snap.compose && pdfDoc && !convUsed) snap.pdfRef = `${jobAtSend._id}:${pdfDoc._id}`; // so the next save of this draft can replace this PDF
     await markSaved(snap);
-    if (!problems.length) await tagSaved(tagEpoch);
 
     let msg;
     if (duplicate) {
@@ -1759,13 +1756,10 @@ function syncRoamingApi() {
   } catch { /* roaming settings unavailable */ }
 }
 ["key", "base"].forEach((id) => $(id).addEventListener("change", () => { store.set("wb_" + id, $(id).value.trim()); syncRoamingApi(); }));
-// ---- Settings dropdown: automatic subject details and the saved-email tag ----
-const TAG_DEFAULT = "Saved to Wunderbuild";
+// ---- Settings dropdown: automatic subject details ----
 function loadPrefs() {
   const o = subjOpts();
   $("sjNum").checked = o.num; $("sjName").checked = o.name; $("sjAddr").checked = o.addr;
-  $("tagOn").checked = store.get("wb_tag") !== "0";
-  $("tagName").value = store.get("wb_tagname") || "";
   subjExample();
 }
 function subjExample() {
@@ -1777,21 +1771,6 @@ function subjExample() {
   store.set(k, $(id).checked ? "1" : "0"); subjExample();
   if (isCompose() && $("subjPrefix").checked && job) applySubjectPrefix(false, true); // rewrite the details already in the subject
 }));
-$("tagOn").addEventListener("change", () => store.set("wb_tag", $("tagOn").checked ? "1" : "0"));
-$("tagName").addEventListener("change", () => store.set("wb_tagname", $("tagName").value.trim()));
-// Puts the Outlook category on the open email (what Outlook shows in the message list; add-ins cannot draw their own icon there).
-// epoch: the value of itemEpoch when the save started; if another email was selected since, nothing is tagged.
-let itemEpoch = 0;
-async function tagSaved(epoch) {
-  if ($("tagOn") && !$("tagOn").checked) return;
-  try {
-    if (epoch !== itemEpoch) return;
-    const it = Office.context.mailbox.item;
-    if (!it || !it.categories || typeof it.categories.addAsync !== "function") { diag("tag", "this Outlook cannot set categories"); return; }
-    const name = ($("tagName").value || "").trim() || TAG_DEFAULT;
-    await new Promise((resolve) => it.categories.addAsync([name], (r) => { diag("tag", r && r.status === Office.AsyncResultStatus.Succeeded ? `category "${name}" set` : `category not set (${r && r.error ? r.error.message : "refused"})`); resolve(); }));
-  } catch (e) { diag("tag", `category not set (${e && e.message ? e.message : e})`); }
-}
 $("askSend").addEventListener("change", () => {
   try { const rs = Office.context.roamingSettings; rs.set("wb_ask", $("askSend").checked); rs.saveAsync(() => {}); } catch { /* settings unavailable */ }
 });
@@ -1866,7 +1845,7 @@ Office.onReady(async () => {
   applyMode();
   // The pane stays open while other items are selected, and the same pane can show a received email or an email
   // being written (e.g. an inline reply), so the mode is re-checked every time the item changes.
-  Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { itemEpoch++; applyMode(); if (sending) { pendingRefresh = true; return; } refreshForItem(false); });
+  Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { applyMode(); if (sending) { pendingRefresh = true; return; } refreshForItem(false); });
   await refreshForItem(false);
   // Once the panel is up and quiet, the PDF tools are fetched in the background so saving does not wait for them.
   if ($("fmtPdf").checked) setTimeout(() => { (($("convPdf").checked) ? loadConvTools() : loadThreadTool()).catch(() => {}); }, 2500);
