@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.78"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.79"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const missingEls = {}; // a page kept from an older version may lack newer controls: they get a harmless stand-in instead of crashing the panel
 const $ = (id) => document.getElementById(id) || (missingEls[id] || (missingEls[id] = document.createElement("div")));
@@ -719,17 +719,35 @@ async function runPickSearch() {
   const run = ++pickRun, forJob = job;
   if (!forJob) return;
   $("pickList").textContent = ""; pickDocs = []; updatePickGo();
-  try {
-    setPickStatus("Reading the job's folders…", "busy");
-    indexProgress = (n, total) => { if (run === pickRun) setPickStatus(`Reading the job's folders… ${n} of ${total}`, "busy"); };
-    const files = await jobFileIndex(forJob._id);
-    if (run !== pickRun || job !== forJob) return;
-    const words = q.split(/\s+/);
+  const words = q.split(/\s+/);
+  const folderEl = $("pickFolder"), folderName = folderEl.selectedOptions && folderEl.selectedOptions[0] ? folderEl.selectedOptions[0].text : "this folder";
+  // Matches in the folder being looked at appear first (one request); the rest of the job follows when it has been read.
+  const show = (files, note) => {
+    const ticked = new Set([...$("pickList").querySelectorAll("input")].map((c, i) => (c.checked && pickDocs[i] ? pickDocs[i]._id : null)).filter(Boolean));
     const hits = files.filter((x) => words.every((w) => String(x.d.name).toLowerCase().includes(w))).sort((a, b) => byName(a.d, b.d));
     const shown = hits.slice(0, 60);
-    setPickStatus(hits.length ? (hits.length > shown.length ? `Showing the first ${shown.length} of ${hits.length} matches. Type more to narrow it down.` : `${hits.length} match${hits.length === 1 ? "" : "es"}.`) : "No files found.");
-    if (files.partial) setPickStatus($("pickStatus").textContent + " Some folders could not be read.", hits.length ? "" : "err");
     renderPickRows(shown.map((x) => ({ d: x.d, sub: `${x.path} · ${sizeText(x.d.size)}` })));
+    [...$("pickList").querySelectorAll("input")].forEach((c, i) => { if (pickDocs[i] && ticked.has(pickDocs[i]._id)) c.checked = true; });
+    updatePickGo();
+    return { hits, shown };
+  };
+  let fullDone = false;
+  try {
+    setPickStatus("Reading the job's folders…", "busy");
+    indexProgress = (n, total) => { if (run === pickRun && !fullDone) setPickStatus(`${quickNote}Reading the other folders… ${n} of ${total}`, "busy"); };
+    var quickNote = "";
+    const quick = listDocs(forJob._id, folderEl.value).then((docs) => {
+      if (run !== pickRun || job !== forJob || fullDone) return;
+      const r = show(docs.map((d) => ({ d, path: folderName })));
+      quickNote = `${r.hits.length} match${r.hits.length === 1 ? "" : "es"} in ${folderName} so far. `;
+      setPickStatus(`${quickNote}Reading the other folders…`, "busy");
+    }).catch(() => {});
+    const files = await jobFileIndex(forJob._id);
+    fullDone = true; await quick;
+    if (run !== pickRun || job !== forJob) return;
+    const r = show(files);
+    setPickStatus(r.hits.length ? (r.hits.length > r.shown.length ? `Showing the first ${r.shown.length} of ${r.hits.length} matches. Type more to narrow it down.` : `${r.hits.length} match${r.hits.length === 1 ? "" : "es"}.`) : "No files found.");
+    if (files.partial) setPickStatus($("pickStatus").textContent + " Some folders could not be read.", r.hits.length ? "" : "err");
   } catch (e) { if (run === pickRun) setPickStatus(e.message, "err"); }
 }
 async function openPicker() {
