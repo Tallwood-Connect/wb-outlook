@@ -1,0 +1,44 @@
+# Publishes the add-in to GitHub Pages:
+#   stable branch -> https://tallwood-connect.github.io/wb-outlook/       (what the beta users and the installed manifest use)
+#   main branch   -> https://tallwood-connect.github.io/wb-outlook/dev/   (work in progress)
+# Runs on every push to main. To promote: move `stable` to the tested commit, then run this workflow
+# (gh workflow run pages.yml --ref main). The workflow always runs from main because the github-pages
+# environment only accepts deployments from the default branch.
+name: Publish pages
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: stable
+          path: site
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: site/dev
+      - name: Tidy
+        run: |
+          rm -rf site/.git site/.github site/dev/.git site/dev/.github site/dev/dev
+          touch site/.nojekyll
+          ls site site/dev
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4
