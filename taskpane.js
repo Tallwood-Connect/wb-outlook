@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.74"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.75"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const missingEls = {}; // a page kept from an older version may lack newer controls: they get a harmless stand-in instead of crashing the panel
 const $ = (id) => document.getElementById(id) || (missingEls[id] || (missingEls[id] = document.createElement("div")));
@@ -610,10 +610,10 @@ function updatePickGo() { $("pickGo").disabled = sending || ![...$("pickList").q
 // Folders with names like Archive, Archived or Superseded are left out, so old versions are not attached by mistake.
 const isArchiveName = (n) => /archiv|supersed|supercede|obsolete/i.test(String(n || ""));
 let treeCache = null; // { jobId, root, promise }
-const TREE_KEY = (id) => "wb_ftree_" + id, TREE_MAX_AGE = 15 * 60 * 1000;
+const TREE_KEY = (id) => "wb_ftree_" + id, TREE_FRESH = 15 * 60 * 1000, TREE_MAX_AGE = 30 * 864e5; // used at once for 30 days; refreshed quietly in the background when older than 15 minutes
 const dropTree = (jobId) => { treeCache = null; if (jobId) store.remove(TREE_KEY(jobId)); };
-function readSavedTree(jobId) { // the full folder list from a few minutes ago, kept on this computer
-  try { const r = JSON.parse(store.get(TREE_KEY(jobId)) || "null"); if (r && Date.now() - r.at < TREE_MAX_AGE && Array.isArray(r.list)) return r.list; } catch { /* ignore */ }
+function readSavedTree(jobId) { // the full folder list from earlier, kept on this computer ({ list, stale })
+  try { const r = JSON.parse(store.get(TREE_KEY(jobId)) || "null"); if (r && Date.now() - r.at < TREE_MAX_AGE && Array.isArray(r.list)) return { list: r.list, stale: Date.now() - r.at >= TREE_FRESH }; } catch { /* ignore */ }
   return null;
 }
 const flattenTree = (root) => {
@@ -622,35 +622,41 @@ const flattenTree = (root) => {
   walk(root.subFolders, "");
   return out;
 };
+// Asks Wunderbuild for the folders: the quick top-level list first (t.root), then every level below (t.promise).
+function startWalk(jobId, low) {
+  const t = {}; let rootData = null;
+  t.root = api(`/documents/job/${jobId}/folders`, low ? { low: true } : {}).then((r) => { rootData = r; return flattenTree(r); });
+  t.promise = t.root.then(async () => {
+    let calls = 0; const walkStart = Date.now();
+    const expand = async (f, depth) => {
+      if (isArchiveName(f.name)) return; // no need to look inside
+      let subs = f.subFolders || [];
+      if (!subs.length && depth < 8 && calls < 300) {
+        calls++;
+        try { subs = (await api(`/documents/job/${jobId}/folders/${f._id}`, { low: true })).subFolders || []; } catch { /* leave it as a last-level folder */ }
+      }
+      f.subFolders = subs;
+      await Promise.all(subs.map((x) => expand(x, depth + 1)));
+    };
+    await Promise.all((rootData.subFolders || []).map((f) => expand(f, 1)));
+    const out = flattenTree(rootData);
+    diag("folders", `listed ${out.length - 1} folders using ${calls} request(s) in ${Date.now() - walkStart} ms (${low ? "quiet refresh" : "background"})`);
+    store.set(TREE_KEY(jobId), JSON.stringify({ at: Date.now(), list: out }));
+    t.full = out;
+    return out;
+  });
+  return t;
+}
 // root = the quick list (one request, or the saved list); promise = the complete list, however deeply nested.
+// A saved list is used straight away, however old; if it is older than 15 minutes it is refreshed quietly for next time.
 function folderTrees(jobId) {
   if (treeCache && treeCache.jobId === jobId) return treeCache;
-  const t = { jobId };
   const saved = readSavedTree(jobId);
-  if (saved) { t.root = Promise.resolve(saved); t.promise = t.root; t.full = saved; }
-  else {
-    let rootData = null;
-    t.root = api(`/documents/job/${jobId}/folders`).then((r) => { rootData = r; return flattenTree(r); });
-    t.promise = t.root.then(async () => {
-      let calls = 0; const walkStart = Date.now();
-      const expand = async (f, depth) => {
-        if (isArchiveName(f.name)) return; // no need to look inside
-        let subs = f.subFolders || [];
-        if (!subs.length && depth < 8 && calls < 300) {
-          calls++;
-          try { subs = (await api(`/documents/job/${jobId}/folders/${f._id}`, { low: true })).subFolders || []; } catch { /* leave it as a last-level folder */ }
-        }
-        f.subFolders = subs;
-        await Promise.all(subs.map((x) => expand(x, depth + 1)));
-      };
-      await Promise.all((rootData.subFolders || []).map((f) => expand(f, 1)));
-      const out = flattenTree(rootData);
-      diag("folders", `listed ${out.length - 1} folders using ${calls} request(s) in ${Date.now() - walkStart} ms (background)`);
-      store.set(TREE_KEY(jobId), JSON.stringify({ at: Date.now(), list: out }));
-      t.full = out;
-      return out;
-    });
-  }
+  let t;
+  if (saved) {
+    t = { jobId, root: Promise.resolve(saved.list), full: saved.list }; t.promise = t.root;
+    if (saved.stale) { const q = startWalk(jobId, true); q.promise.catch(() => {}); }
+  } else t = { jobId, ...startWalk(jobId, false) };
   treeCache = t;
   const fail = () => { if (treeCache === t) treeCache = null; };
   t.root.catch(fail); t.promise.catch(fail);
@@ -1083,9 +1089,9 @@ async function listDocs(jobId, folderId, low) {
 }
 
 // Looks in the folder the email will be saved to, and in Correspondence, plus each one's "Outlook Files" folder.
-async function findExisting(forJob, destFolderId, id) {
+async function findExisting(forJob, destFolderId, id, corrOnly) {
   const corr = findNamedOption($("folder").options, "Correspondence");
-  const folders = [...new Set([destFolderId, corr ? corr.value : destFolderId])];
+  const folders = corrOnly ? [corr ? corr.value : destFolderId] : [...new Set([destFolderId, corr ? corr.value : destFolderId])]; // the "already saved" check looks in Correspondence only (fewer requests)
   const lists = await Promise.all(folders.map(async (f) => {
     const [docs, outlookId] = await Promise.all([listDocs(forJob._id, f), findOutlookFolderId(f, forJob._id)]);
     return [...docs, ...(outlookId ? await listDocs(forJob._id, outlookId) : [])];
@@ -1105,7 +1111,7 @@ async function checkDuplicate() {
   // no "already saved" note straight after saving it
   note.className = "busy"; note.textContent = "Checking whether this email is already saved…";
   try {
-    const found = await findExisting(forJob, $("folder").value, await emailId(item));
+    const found = await findExisting(forJob, $("folder").value, await emailId(item), true);
     if (run !== dupRun || job !== forJob) return; // something changed meanwhile
     note.className = ""; note.textContent = "";
     let both = found.some(isEmlDoc); // the .eml carries the reference; its PDF was saved with it
