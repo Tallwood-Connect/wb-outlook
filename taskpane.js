@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.77"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.78"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const missingEls = {}; // a page kept from an older version may lack newer controls: they get a harmless stand-in instead of crashing the panel
 const $ = (id) => document.getElementById(id) || (missingEls[id] || (missingEls[id] = document.createElement("div")));
@@ -1091,9 +1091,12 @@ async function listDocs(jobId, folderId, low) {
 // Looks in the folder the email will be saved to, and in Correspondence, plus each one's "Outlook Files" folder.
 async function findExisting(forJob, destFolderId, id, corrOnly) {
   const corr = findNamedOption($("folder").options, "Correspondence");
-  const folders = corrOnly ? [corr ? corr.value : destFolderId] : [...new Set([destFolderId, corr ? corr.value : destFolderId])]; // the "already saved" check looks in Correspondence only (fewer requests)
+  // The "already saved" check looks only in Correspondence / Outlook Files (where the saved .eml, which carries the reference, goes).
+  const folders = corrOnly ? [corr ? corr.value : destFolderId] : [...new Set([destFolderId, corr ? corr.value : destFolderId])];
   const lists = await Promise.all(folders.map(async (f) => {
-    const [docs, outlookId] = await Promise.all([listDocs(forJob._id, f), findOutlookFolderId(f, forJob._id)]);
+    const outlookId = await findOutlookFolderId(f, forJob._id);
+    if (corrOnly) return outlookId ? listDocs(forJob._id, outlookId) : [];
+    const docs = await listDocs(forJob._id, f);
     return [...docs, ...(outlookId ? await listDocs(forJob._id, outlookId) : [])];
   }));
   const all = lists.flat(), hits = all.filter((d) => (d.name || "").includes(`[${id}]`));
@@ -1105,9 +1108,26 @@ async function findExisting(forJob, destFolderId, id, corrOnly) {
 // "Not saved" answers are only kept for this session (10 minutes), since someone else could save the email meanwhile.
 const SAVED_PREFIX = "wb_saved_", notSavedAt = new Map();
 const savedMarkKey = (id, jobId) => SAVED_PREFIX + id + "_" + jobId;
+const EML_PREFIX = "wb_emlids_"; // per job: { at, ids: { reference: savedMs } } read from the job's Outlook Files folder by the set-up button
+function readEmlIndex(jobId) { try { const r = JSON.parse(store.get(EML_PREFIX + jobId) || "null"); return r && r.ids ? r : null; } catch { return null; } }
 function readSavedMark(id, jobId) {
   try { const r = JSON.parse(store.get(savedMarkKey(id, jobId)) || "null"); if (r && r.at && Date.now() - r.at < CONV_MAX_AGE) return r; } catch { /* ignore */ }
+  const ix = readEmlIndex(jobId); // saved by anyone, found by the set-up scan
+  if (ix && Object.prototype.hasOwnProperty.call(ix.ids, id)) return { at: ix.at, saved: ix.ids[id] };
   return null;
+}
+// Reads the saved .eml names in the job's Correspondence / Outlook Files folder and keeps their references.
+async function indexJobEmails(jobId) {
+  const list = readSavedTree(jobId); const tree = list && list.list;
+  if (!tree) throw new Error("no folder list");
+  const out = tree.find((f) => f.path.toLowerCase() === "correspondence / outlook files");
+  const ids = {};
+  if (out) for (const d of await listDocs(jobId, out.id, true)) {
+    const m = isEmlDoc(d) && /\[([^\[\]]+)\]\.eml$/i.exec(d.name || "");
+    if (m) { const t = docSavedAt(d); ids[m[1].toLowerCase()] = t ? t.getTime() : 0; }
+  }
+  store.set(EML_PREFIX + jobId, JSON.stringify({ at: Date.now(), ids }));
+  return Object.keys(ids).length;
 }
 function rememberSaved(id, jobId, savedMs) { notSavedAt.delete(id + "_" + jobId); store.set(savedMarkKey(id, jobId), JSON.stringify({ at: Date.now(), saved: savedMs || Date.now() })); }
 function forgetSaved(id, jobId) { store.remove(savedMarkKey(id, jobId)); }
@@ -1309,7 +1329,7 @@ async function ensureOutlookFolder(parentId, jobId = job._id) {
 
 $("clearCache").addEventListener("click", () => {
   jobsCache = null; jobsAt = 0;
-  purge((k) => k === JOBS_KEY || k === "wb_job" || k.startsWith("wb_ftree_") || k.startsWith("wb_sent_") || k.startsWith(SAVED_PREFIX) || k.startsWith(CONV_PREFIX) || k.startsWith(CPDF_PREFIX));
+  purge((k) => k === JOBS_KEY || k === "wb_job" || k.startsWith("wb_ftree_") || k.startsWith("wb_sent_") || k.startsWith(SAVED_PREFIX) || k.startsWith(EML_PREFIX) || k.startsWith(CONV_PREFIX) || k.startsWith(CPDF_PREFIX));
   $("clearNote").textContent = "Saved job list and conversation history cleared.";
 });
 // Set-up helper: reads the folder list of every job once and keeps it on this computer, so later jobs open at once.
@@ -1320,25 +1340,28 @@ $("prepFolders").addEventListener("click", async () => {
   if (btn.dataset.busy) { prepRun++; return; } // pressed again while running = stop
   if (!$("key").value.trim()) { note.textContent = "Add your API key first."; return; }
   const run = ++prepRun; btn.dataset.busy = "1"; btn.textContent = "Stop loading folder lists";
-  let done = 0, failed = 0, total = 0;
+  let done = 0, failed = 0, total = 0, emails = 0;
   try {
     note.textContent = "Getting the job list…";
-    const jobs = (await loadAllJobs()).filter((j) => !readSavedTree(j._id));
+    const jobs = (await loadAllJobs()).filter((j) => !readSavedTree(j._id) || !readEmlIndex(j._id) || Date.now() - readEmlIndex(j._id).at > 15 * 60 * 1000);
     total = jobs.length;
-    if (!total) note.textContent = "Every job already has a saved folder list.";
+    if (!total) note.textContent = "Every job is already up to date.";
     const queue = [...jobs];
     const worker = async () => {
       while (queue.length && run === prepRun) {
         const j = queue.shift();
-        try { await startWalk(j._id, true).promise; } catch { failed++; }
-        done++; if (run === prepRun) note.textContent = `Loading folder lists… ${done} of ${total} jobs${failed ? ` (${failed} could not be read)` : ""}. This can take a while; you can keep working.`;
+        try {
+          if (!readSavedTree(j._id)) await startWalk(j._id, true).promise; // the folder list
+          emails += await indexJobEmails(j._id); // the saved email references
+        } catch { failed++; }
+        done++; if (run === prepRun) note.textContent = `Loading folder lists and saved emails… ${done} of ${total} jobs${failed ? ` (${failed} could not be read)` : ""}. This can take a while; you can keep working.`;
       }
     };
     await Promise.all([worker(), worker()]);
-    if (total) note.textContent = run === prepRun ? `Done: ${done - failed} of ${total} jobs saved${failed ? `, ${failed} could not be read (run it again to retry them)` : ""}.` : `Stopped after ${done} of ${total} jobs. Run it again to carry on.`;
-    diag("folders", `set-up: ${done - failed} of ${total} jobs saved, ${failed} failed`);
+    if (total) note.textContent = run === prepRun ? `Done: ${done - failed} of ${total} jobs saved (${emails} saved emails found)${failed ? `, ${failed} could not be read (run it again to retry them)` : ""}.` : `Stopped after ${done} of ${total} jobs. Run it again to carry on.`;
+    diag("folders", `set-up: ${done - failed} of ${total} jobs saved, ${failed} failed, ${emails} saved emails found`);
   } catch (e) { note.textContent = `Could not finish: ${describeError(e)}`; }
-  delete btn.dataset.busy; btn.textContent = "Load folder lists for all jobs (set-up)";
+  delete btn.dataset.busy; btn.textContent = "Load folder lists and saved emails for all jobs (set-up)";
 });
 
 $("signOut").addEventListener("click", () => {
