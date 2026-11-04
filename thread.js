@@ -15,6 +15,7 @@
   const JOB_LEAD = /^J-?\d{4,}(?:\s*[-\u2013]\s*|\s+)((?:(?!\s[-\u2013]\s).)*?)(?:\s+[-\u2013]\s+|\s*$)/i;
   function normSubject(subject) {
     let t = String(subject || "").replace(/^\s*((re|fw|fwd|aw|sv|vs)\s*:\s*)+/i, "");
+    t = t.replace(/^\s*\[[^\]]*J-?\d{4,}[^\]]*\]\s*/i, ""); // "[J-01041 - Name] " (layout used since v1.70)
     t = t.replace(JOB_LEAD, "");
     t = t.replace(/^\s*((re|fw|fwd|aw|sv|vs)\s*:\s*)+/i, "");
     return t.replace(/\s+/g, " ").trim();

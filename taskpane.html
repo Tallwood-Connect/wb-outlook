@@ -84,6 +84,10 @@
   .switch input:checked+.track::after{transform:translateX(18px)}
   .switch input:focus-visible+.track{outline:2px solid var(--accent);outline-offset:2px}
   .btns{margin-top:8px}
+  #prefs{margin-top:6px}
+  .grpHead{margin:12px 0 2px;font-weight:600}
+  .opt{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:6px 0}
+  .hint2{margin-top:4px;color:var(--muted);font-size:12px} .hint2:empty{display:none}
   #clearNote{margin-top:6px;color:var(--muted);font-size:12px}
   #clearNote:empty{display:none}
   .more{margin-top:6px;border:0;padding:0}
@@ -112,7 +116,7 @@
 })();
 </script>
 
-<h1>Send to Wunderbuild <span id="ver" data-v="1.69"></span></h1>
+<h1>Send to Wunderbuild <span id="ver" data-v="1.70"></span></h1>
 
 <details id="settings">
   <summary>API settings</summary>
@@ -122,12 +126,26 @@
   <input id="base" type="url" value="https://api.wunderbuild.com/api">
   <label class="chk"><input type="checkbox" id="fmtPdf" checked> Formatted PDF (rendered by the Cloudflare Worker)</label>
   <label class="chk"><input type="checkbox" id="convPdf" checked> One PDF per email conversation (beta): later emails in the same conversation are added to the same PDF</label>
-  <label class="chk"><input type="checkbox" id="askSend"> Ask me to save sent emails to Wunderbuild when I click Send</label>
   <div class="btns">
     <button type="button" class="sec" id="clearCache">Clear saved job list and history</button>
     <button type="button" class="sec" id="signOut">Remove my key and saved data</button>
   </div>
   <div id="clearNote" role="status"></div>
+</details>
+
+<details id="prefs">
+  <summary>Settings</summary>
+  <label class="chk"><input type="checkbox" id="askSend"> Ask me to save sent emails to Wunderbuild when I click Send</label>
+  <div class="grpHead">Automatic subject: include</div>
+  <div class="opt"><span>Job number</span><label class="switch"><input type="checkbox" id="sjNum" role="switch" aria-label="Include the job number in the automatic subject"><span class="track"></span></label></div>
+  <div class="opt"><span>Name</span><label class="switch"><input type="checkbox" id="sjName" role="switch" aria-label="Include the job name in the automatic subject"><span class="track"></span></label></div>
+  <div class="opt"><span>Address</span><label class="switch"><input type="checkbox" id="sjAddr" role="switch" aria-label="Include the job address in the automatic subject"><span class="track"></span></label></div>
+  <div id="sjExample" class="hint2"></div>
+  <div class="grpHead">Saved emails</div>
+  <div class="opt"><span>Tag saved emails with an Outlook category</span><label class="switch"><input type="checkbox" id="tagOn" role="switch" aria-label="Tag emails saved to Wunderbuild with an Outlook category"><span class="track"></span></label></div>
+  <label for="tagName" style="margin-top:4px">Category name</label>
+  <input id="tagName" type="text" placeholder="Saved to Wunderbuild">
+  <div class="hint2">Create a category with this exact name once in Outlook (Categorize &gt; All Categories) and give it a colour. Saved emails then show that coloured tag in the message list.</div>
 </details>
 
 <div id="subjBar" hidden>
@@ -216,8 +234,8 @@
   <button type="button" class="sec" id="brGo" disabled>Attach selected</button>
 </div>
 
-<script src="pdf.js?v=1.69"></script>
-<script src="eml.js?v=1.69"></script>
-<script src="taskpane.js?v=1.69"></script>
+<script src="pdf.js?v=1.70"></script>
+<script src="eml.js?v=1.70"></script>
+<script src="taskpane.js?v=1.70"></script>
 </body>
 </html>

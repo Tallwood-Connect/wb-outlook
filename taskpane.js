@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.69"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.70"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 const missingEls = {}; // a page kept from an older version may lack newer controls: they get a harmless stand-in instead of crashing the panel
 const $ = (id) => document.getElementById(id) || (missingEls[id] || (missingEls[id] = document.createElement("div")));
@@ -216,18 +216,29 @@ function renderJobList(jobs) {
 /* ---------- job details in the subject (emails being written only) ---------- */
 let appliedPrefix = ""; // the text this add-in last put at the start of the subject
 function subjectPrefixOn() { return isCompose() && $("subjPrefix").checked; }
-function buildPrefix(j) { // e.g. "J-01067 - Smith"
-  const num = fullJobNo(j);
+// Which job details go in the subject (Settings): kept on this computer.
+function subjOpts() { return { num: store.get("wb_sj_num") !== "0", name: store.get("wb_sj_name") !== "0", addr: store.get("wb_sj_addr") === "1" }; }
+function buildPrefix(j) { // e.g. "[J-01067 - Smith - 12 Example Street]": square brackets, hyphens between the chosen details
+  const o = subjOpts();
   const name = String(j.name || "").replace(/\s*[-–]\s*D\s*$/i, "").trim(); // drops a trailing "- D"
-  return [num, name].filter(Boolean).join(" - ");
+  const parts = [o.num && fullJobNo(j), o.name && name, o.addr && String(j.address || "").replace(/\s+/g, " ").trim()].filter(Boolean);
+  return parts.length ? `[${parts.join(" - ")}]` : "";
 }
 // Does the subject (after any Re:/Fwd:) already start with this job's number, in any layout?
 // "J-01041 - Hann - …", "J-01041 Hann - …" and older ones with an address all count, so nothing is ever added twice.
 function hasJobPrefix(subject, j) {
   const want = j && j.jobNumber ? parseInt(String(j.jobNumber).replace(/\D/g, ""), 10) : NaN;
-  const m = /^J-?\s?0*(\d+)(?!\d)/i.exec(String(subject || "").replace(LEAD_RE, "").trim());
-  return !!m && !isNaN(want) && parseInt(m[1], 10) === want;
+  const t = String(subject || "").replace(LEAD_RE, "").trim();
+  const m = /^J-?\s?0*(\d+)(?!\d)/i.exec(t);
+  if (m && !isNaN(want) && parseInt(m[1], 10) === want) return true;
+  const b = BRACKET_LEAD.exec(t); // "[J-01041 - Name] ..." (also with the number switched off: "[Name - Address] ...")
+  if (!b || !j) return false;
+  const bn = b[1].match(/J-?\s?0*(\d+)(?!\d)/i);
+  if (bn) return !isNaN(want) && parseInt(bn[1], 10) === want;
+  const inner = norm(b[1]), nm = norm(j.name), ad = norm(j.address);
+  return !!inner && ((!!nm && inner.includes(nm)) || (!!ad && inner.includes(ad)));
 }
+const BRACKET_LEAD = /^\[([^\]]*)\]\s*/;
 const JOB_LEAD = /^J-?\d{4,}(?:\s*[-–]\s*|\s+)((?:(?!\s[-–]\s).)*?)(?:\s+[-–]\s+|\s*$)/i; // keep in step with JOB_LEAD in thread.js
 const LEAD_RE = /^(\s*(?:(?:re|fw|fwd|aw|sv|vs)\s*:\s*)+)/i; // "Re: ", "Fwd: " etc. put in front by replying or forwarding
 function splitSubject(subject) { // { lead: "Re: ", rest: the subject without that lead or the job details }
@@ -236,12 +247,14 @@ function splitSubject(subject) { // { lead: "Re: ", rest: the subject without th
   if (l) { lead = l[1]; t = t.slice(lead.length); }
   if (appliedPrefix && t.startsWith(appliedPrefix)) return { lead, rest: t.slice(appliedPrefix.length).replace(/^[\s:\-–]+/, "") };
   // also recognise details added earlier (e.g. before the panel was reopened, or in an email being replied to or forwarded): "J-01067 - Name (#12 Street, SUBURB) - "
-  const m = JOB_LEAD.exec(t); // job details in front, whatever layout and with or without an address
+  const b = BRACKET_LEAD.exec(t); // "[J-01041 - Name] " (the layout used since v1.70)
+  if (b && (/J-?\s?0*\d{4,}/i.test(b[1]) || (job && hasJobPrefix(t, job)))) return { lead, rest: t.slice(b[0].length) };
+  const m = JOB_LEAD.exec(t); // older layouts: job details in front, with or without an address
   return { lead, rest: m ? t.slice(m[0].length) : t };
 }
 function stripPrefix(subject) { const p = splitSubject(subject); return p.lead + p.rest; } // keeps any "Re: " in front
 let subjRun = 0, subjBusy = false;
-async function applySubjectPrefix(remove) {
+async function applySubjectPrefix(remove, force) {
   if (!isCompose() || !cur) return;
   const run = ++subjRun;
   $("subjNote").textContent = "";
@@ -249,11 +262,12 @@ async function applySubjectPrefix(remove) {
     const it = Office.context.mailbox.item;
     const now = await asyncVal((cb) => it.subject.getAsync(cb));
     if (run !== subjRun || now == null) return;
-    if (!remove && job && hasJobPrefix(now, job)) { appliedPrefix = ""; return; } // this job's details are already there (e.g. replying to an email that has them): leave it exactly as it is
+    if (!remove && job && hasJobPrefix(now, job) && !(force && appliedPrefix && now.replace(LEAD_RE, "").trimStart().startsWith(appliedPrefix))) { appliedPrefix = ""; return; } // this job's details are already there (e.g. replying to an email that has them): leave it exactly as it is
     const { lead, rest } = splitSubject(now); // a "Re: " / "Fwd: " in front is kept; another job's details are replaced, never doubled
     const prefix = remove || !job ? "" : buildPrefix(job);
-    const next = prefix ? `${lead}${prefix} - ${rest}` : lead + rest; // ends "- " ready for the person to type
+    const next = prefix ? `${lead}${prefix} ${rest}` : lead + rest; // e.g. "[J-01041 - Hann] " then the person's own words
     appliedPrefix = prefix;
+    if (!remove && job && !prefix) $("subjNote").textContent = "No job details are selected for the subject. Turn some on in Settings.";
     if (next.trimEnd() === now.trimEnd()) return; // Outlook may trim the trailing space
     cur.subject = next; subjBusy = true; // so the live watcher does not treat this as the person typing
     await new Promise((resolve, reject) => it.subject.setAsync(next, (r) => (r.status === Office.AsyncResultStatus.Succeeded ? resolve() : reject(new Error((r.error && r.error.message) || "Outlook refused")))));
@@ -402,6 +416,7 @@ function clearJob() {
 
 async function chooseJob(j) {
   job = j;
+  subjExample();
   resetPicker(); // files listed for a previous job must not be attached for this one
   matchRun++; // cancel any matching still running for this email
   $("matchNote").className = ""; $("matchNote").textContent = "";
@@ -1075,7 +1090,7 @@ let dupRun = 0, justSaved = null; // justSaved = id of the job this email was ju
 function resetDup() { dupRun++; dupFound = false; repliedOnly = false; savedAt = null; attOpen = false; $("dupNote").className = ""; $("dupNote").textContent = ""; }
 async function checkDuplicate() {
   resetDup(); refreshSend();
-  const run = dupRun, forJob = job, item = cur, note = $("dupNote");
+  const run = dupRun, forJob = job, item = cur, note = $("dupNote"), ep = itemEpoch;
   if (!forJob || !item || justSaved === forJob._id) return;
   if (isCompose() && !item.savedBefore) return; // a brand new email cannot already be saved, so nothing to look for
   // no "already saved" note straight after saving it
@@ -1086,6 +1101,7 @@ async function checkDuplicate() {
     note.className = ""; note.textContent = "";
     let both = found.some(isEmlDoc); // the .eml carries the reference; its PDF was saved with it
     if (found.length) {
+      if (both) tagSaved(ep); // an email found already saved gets the category too
       dupFound = both; // received emails show a green "Sent to Wunderbuild" button instead of a message
       if (both) {
         savedAt = found.map(docSavedAt).filter(Boolean).sort((a, b) => a - b)[0] || null;
@@ -1258,7 +1274,7 @@ $("clearCache").addEventListener("click", () => {
 $("signOut").addEventListener("click", () => {
   jobsCache = null; jobsAt = 0;
   purge((k) => k.startsWith("wb_"));
-  $("key").value = ""; $("base").value = DEFAULT_BASE; $("fmtPdf").checked = true; $("convPdf").checked = true; $("askSend").checked = false; $("subjPrefix").checked = false; syncSwitch();
+  $("key").value = ""; $("base").value = DEFAULT_BASE; $("fmtPdf").checked = true; $("convPdf").checked = true; $("askSend").checked = false; $("subjPrefix").checked = false; syncSwitch(); loadPrefs();
   try { const rs = Office.context.roamingSettings; rs.set("wb_ask", false); rs.remove("wb_key"); rs.remove("wb_base"); rs.saveAsync(() => {}); } catch { /* ignore */ } // the copy kept in the mailbox goes too
   clearJob();
   $("clearNote").textContent = "Your key and all saved data were removed from this computer.";
@@ -1308,6 +1324,7 @@ $("send").addEventListener("click", async () => {
   lastResult = null;
   sending = true; lockUI(true); $("send").disabled = true;
   const saveStart = Date.now();
+  const tagEpoch = itemEpoch; // so the Outlook category only goes on the email that was saved
   diag("save", `started (${isCompose() ? "email being written" : "received email"})`);
   let convLock = null; // held while a conversation PDF is being replaced
   try {
@@ -1475,6 +1492,7 @@ $("send").addEventListener("click", async () => {
     if (snap.compose) saveReplyRecord(convId, jobAtSend);
     if (snap.compose && pdfDoc && !convUsed) snap.pdfRef = `${jobAtSend._id}:${pdfDoc._id}`; // so the next save of this draft can replace this PDF
     await markSaved(snap);
+    if (!problems.length) await tagSaved(tagEpoch);
 
     let msg;
     if (duplicate) {
@@ -1741,6 +1759,39 @@ function syncRoamingApi() {
   } catch { /* roaming settings unavailable */ }
 }
 ["key", "base"].forEach((id) => $(id).addEventListener("change", () => { store.set("wb_" + id, $(id).value.trim()); syncRoamingApi(); }));
+// ---- Settings dropdown: automatic subject details and the saved-email tag ----
+const TAG_DEFAULT = "Saved to Wunderbuild";
+function loadPrefs() {
+  const o = subjOpts();
+  $("sjNum").checked = o.num; $("sjName").checked = o.name; $("sjAddr").checked = o.addr;
+  $("tagOn").checked = store.get("wb_tag") !== "0";
+  $("tagName").value = store.get("wb_tagname") || "";
+  subjExample();
+}
+function subjExample() {
+  const j = job || { jobNumber: 1041, name: "Hann", address: "12 Example Street" };
+  const p = buildPrefix(j);
+  $("sjExample").textContent = p ? `Example: ${p} Your subject` : "Nothing selected: the subject will be left as typed.";
+}
+[["sjNum", "wb_sj_num"], ["sjName", "wb_sj_name"], ["sjAddr", "wb_sj_addr"]].forEach(([id, k]) => $(id).addEventListener("change", () => {
+  store.set(k, $(id).checked ? "1" : "0"); subjExample();
+  if (isCompose() && $("subjPrefix").checked && job) applySubjectPrefix(false, true); // rewrite the details already in the subject
+}));
+$("tagOn").addEventListener("change", () => store.set("wb_tag", $("tagOn").checked ? "1" : "0"));
+$("tagName").addEventListener("change", () => store.set("wb_tagname", $("tagName").value.trim()));
+// Puts the Outlook category on the open email (what Outlook shows in the message list; add-ins cannot draw their own icon there).
+// epoch: the value of itemEpoch when the save started; if another email was selected since, nothing is tagged.
+let itemEpoch = 0;
+async function tagSaved(epoch) {
+  if ($("tagOn") && !$("tagOn").checked) return;
+  try {
+    if (epoch !== itemEpoch) return;
+    const it = Office.context.mailbox.item;
+    if (!it || !it.categories || typeof it.categories.addAsync !== "function") { diag("tag", "this Outlook cannot set categories"); return; }
+    const name = ($("tagName").value || "").trim() || TAG_DEFAULT;
+    await new Promise((resolve) => it.categories.addAsync([name], (r) => { diag("tag", r && r.status === Office.AsyncResultStatus.Succeeded ? `category "${name}" set` : `category not set (${r && r.error ? r.error.message : "refused"})`); resolve(); }));
+  } catch (e) { diag("tag", `category not set (${e && e.message ? e.message : e})`); }
+}
 $("askSend").addEventListener("change", () => {
   try { const rs = Office.context.roamingSettings; rs.set("wb_ask", $("askSend").checked); rs.saveAsync(() => {}); } catch { /* settings unavailable */ }
 });
@@ -1809,12 +1860,13 @@ Office.onReady(async () => {
   $("convPdf").checked = store.get("wb_convpdf") !== "0"; // on unless switched off
   $("subjPrefix").checked = true; // Auto is always the starting choice
   try { $("askSend").checked = Office.context.roamingSettings.get("wb_ask") === true; } catch { /* settings unavailable */ }
+  loadPrefs();
   if (!$("key").value) $("settings").open = true;
   else syncRoamingApi();
   applyMode();
   // The pane stays open while other items are selected, and the same pane can show a received email or an email
   // being written (e.g. an inline reply), so the mode is re-checked every time the item changes.
-  Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { applyMode(); if (sending) { pendingRefresh = true; return; } refreshForItem(false); });
+  Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { itemEpoch++; applyMode(); if (sending) { pendingRefresh = true; return; } refreshForItem(false); });
   await refreshForItem(false);
   // Once the panel is up and quiet, the PDF tools are fetched in the background so saving does not wait for them.
   if ($("fmtPdf").checked) setTimeout(() => { (($("convPdf").checked) ? loadConvTools() : loadThreadTool()).catch(() => {}); }, 2500);
