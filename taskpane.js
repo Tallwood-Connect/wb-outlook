@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.81"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.82"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -1792,6 +1792,7 @@ async function buildReport() {
   let askOn = "?"; try { askOn = Office.context.roamingSettings.get("wb_ask") === true; } catch { /* ignore */ }
   add(`Settings: formatted PDF ${$("fmtPdf").checked} | conversation PDF ${$("convPdf").checked} | auto subject ${$("subjPrefix").checked} | ask before sending ${askOn}`);
   let root = ""; try { root = new URL(base()).host; } catch { root = "(not a valid address)"; }
+  { let ch = "(none yet)"; try { const c = JSON.parse(store.get("wb_channel") || "null"); if (c) ch = `${c.c}, decided ${Math.round((Date.now() - c.t) / 60000)} min ago`; } catch { /* ignore */ } add(`Copy: ${/\/dev\//.test(location.pathname) ? "dev" : /\/beta\//.test(location.pathname) ? "beta" : "live"} | tester check: ${ch}`); }
   add(`API: key ${key ? `set (${key.length} characters)` : "NOT SET"} | address ${base()} | host ${root} | https ${/^https:/i.test(base())}`);
   try { const rs = Office.context.roamingSettings; add(`Key copy kept in Outlook settings: ${rs.get("wb_key") ? "yes" : "no"}`); } catch { /* ignore */ }
   const keys = store.keys().filter((k) => k.startsWith("wb_")).map((k) => `${k.replace(/_[0-9a-f]{24}$/i, "_<id>")}`);

@@ -1,5 +1,6 @@
 # Publishes the add-in to GitHub Pages:
 #   stable branch -> https://tallwood-connect.github.io/wb-outlook/       (what the beta users and the installed manifest use)
+#   beta branch   -> https://tallwood-connect.github.io/wb-outlook/beta/  (people on the private tester list, chosen by the Worker's /channel)
 #   main branch   -> https://tallwood-connect.github.io/wb-outlook/dev/   (work in progress)
 # Runs on every push to main. To promote: move `stable` to the tested commit, then run this workflow
 # (gh workflow run pages.yml --ref main). The workflow always runs from main because the github-pages
@@ -29,11 +30,15 @@ jobs:
           path: site
       - uses: actions/checkout@v4
         with:
+          ref: beta
+          path: site/beta
+      - uses: actions/checkout@v4
+        with:
           ref: main
           path: site/dev
       - name: Tidy
         run: |
-          rm -rf site/.git site/.github site/dev/.git site/dev/.github site/dev/dev
+          rm -rf site/.git site/.github site/dev/.git site/dev/.github site/dev/dev site/dev/beta site/beta/.git site/beta/.github site/beta/dev site/beta/beta
           touch site/.nojekyll
           ls site site/dev
       - uses: actions/configure-pages@v5
