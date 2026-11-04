@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.88"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.89"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -497,6 +497,7 @@ async function loadFolders() {
     fillAttRowSelects();
     return corr;
   };
+  fillFolderLists = (list) => { if (run === folderRun) fill(list, sel.value, af.value); };
   const corr = fill(tree, null, null);
   corrMissing = false; $("corrNote").hidden = true; // "no Correspondence folder" is only claimed once the whole list is known (below)
   foldersPending = !failed && !corr; // a nested Correspondence folder may still turn up: saving waits for the whole list
@@ -715,24 +716,33 @@ const flattenTree = (root) => {
   return out;
 };
 // Asks Wunderbuild for the folders: the quick top-level list first (t.root), then every level below (t.promise).
+// Each answer from Wunderbuild shows the folder's children AND their children (two levels). So a child listed with no
+// sub-folders really has none, and only the grand-children, whose own children are cut off, need a request of their own.
+// That is only relied on once an answer has actually shown grand-children (proof that this is how Wunderbuild answers);
+// until then every folder shown without sub-folders is asked about, as before.
 function startWalk(jobId, low) {
-  const t = {}; let rootData = null;
-  t.root = api(`/documents/job/${jobId}/folders`, low ? { low: true } : {}).then((r) => { rootData = r; return flattenTree(r); });
+  const t = {}; let rootData = null, twoLevels = false;
+  const hasGrand = (r) => (r.subFolders || []).some((c) => (c.subFolders || []).length);
+  t.root = api(`/documents/job/${jobId}/folders`, low ? { low: true } : {}).then((r) => { rootData = r; twoLevels = hasGrand(r); return flattenTree(r); });
   t.promise = t.root.then(async () => {
-    let calls = 0; const walkStart = Date.now();
-    const expand = async (f, depth) => {
+    let calls = 0, skipped = 0; const walkStart = Date.now();
+    // k = how far below the latest answer this folder sits (1 = a child, 2 = a grand-child, whose children are not shown)
+    const expand = async (f, k, depth) => {
       if (isArchiveName(f.name)) return; // no need to look inside
       let subs = f.subFolders || [];
       if (!subs.length && depth < 8 && calls < 300) {
-        calls++;
-        try { subs = (await api(`/documents/job/${jobId}/folders/${f._id}`, { low: true })).subFolders || []; } catch { /* leave it as a last-level folder */ }
+        if (k === 1 && twoLevels) skipped++; // a child listed without sub-folders has none
+        else {
+          calls++;
+          try { const r = await api(`/documents/job/${jobId}/folders/${f._id}`, { low: true }); subs = r.subFolders || []; if (hasGrand(r)) twoLevels = true; k = 0; } catch { /* leave it as a last-level folder */ }
+        }
       }
       f.subFolders = subs;
-      await Promise.all(subs.map((x) => expand(x, depth + 1)));
+      await Promise.all(subs.map((x) => expand(x, k + 1, depth + 1)));
     };
-    await Promise.all((rootData.subFolders || []).map((f) => expand(f, 1)));
+    await Promise.all((rootData.subFolders || []).map((f) => expand(f, 1, 1)));
     const out = flattenTree(rootData);
-    diag("folders", `listed ${out.length - 1} folders using ${calls} request(s) in ${Date.now() - walkStart} ms (${low ? "quiet refresh" : "background"})`);
+    diag("folders", `listed ${out.length - 1} folders using ${calls} request(s), ${skipped} not needed, in ${Date.now() - walkStart} ms (${low ? "quiet refresh" : "background"})`);
     store.set(TREE_KEY(jobId), JSON.stringify({ at: Date.now(), list: out }));
     t.full = out;
     return out;
@@ -740,14 +750,13 @@ function startWalk(jobId, low) {
   return t;
 }
 // root = the quick list (one request, or the saved list); promise = the complete list, however deeply nested.
-// A saved list is used straight away, however old; if it is older than 15 minutes it is refreshed quietly for next time.
+// A saved list is used straight away, however old. It is refreshed (see refreshFolders) when the folder lists are actually used.
 function folderTrees(jobId) {
   if (treeCache && treeCache.jobId === jobId) return treeCache;
   const saved = readSavedTree(jobId);
   let t;
   if (saved) {
-    t = { jobId, root: Promise.resolve(saved.list), full: saved.list }; t.promise = t.root;
-    if (saved.stale) { const q = startWalk(jobId, true); q.promise.catch(() => {}); }
+    t = { jobId, root: Promise.resolve(saved.list), full: saved.list }; t.promise = t.root; // a saved list is never refreshed just because a job was opened: see refreshFolders
   } else t = { jobId, ...startWalk(jobId, false) };
   treeCache = t;
   const fail = () => { if (treeCache === t) treeCache = null; };
@@ -755,6 +764,22 @@ function folderTrees(jobId) {
   return t;
 }
 const folderTree = (jobId) => folderTrees(jobId).promise;
+// Brings a saved folder list up to date, but only when it is older than 15 minutes AND the person is using the folder lists
+// (opens a folder box, or the attach / browse views): opening an email no longer costs a whole folder read.
+let folderRefresh = null, fillFolderLists = null;
+function refreshFolders(why) {
+  if (!job || !job._id || folderRefresh) return;
+  const jobId = job._id, saved = readSavedTree(jobId);
+  if (!saved || !saved.stale) return; // fresh enough (a missing list is read by loadFolders itself)
+  diag("folders", `refreshing the saved folder list (${why})`);
+  const q = startWalk(jobId, true);
+  folderRefresh = q.promise.then((full) => {
+    if (!job || job._id !== jobId) return;
+    const prev = (saved.list || []).map((f) => f.id + "|" + f.path).join("\n"), now = (full || []).map((f) => f.id + "|" + f.path).join("\n");
+    treeCache = { jobId, root: Promise.resolve(full), full, promise: Promise.resolve(full) };
+    if (prev !== now && fillFolderLists) fillFolderLists(full); // only redrawn when something changed, so an open box is not closed under the person
+  }).catch(() => {}).finally(() => { folderRefresh = null; });
+}
 // Every file in the job (folders are not included), so file names can be searched. Built once per job.
 let indexCache = null, indexProgress = () => {};
 function jobFileIndex(jobId) {
@@ -966,7 +991,7 @@ async function attachBrowsed() {
   brSay(attachSummary(r), r.failed.length ? "err" : "ok");
   if (!$("browse").hidden) browseLoad().then(() => brSay(attachSummary(r), r.failed.length ? "err" : "ok"));
 }
-$("browseBtn").addEventListener("click", openBrowse);
+$("browseBtn").addEventListener("click", () => { refreshFolders("browse opened"); openBrowse(); });
 $("brClose").addEventListener("click", () => { if (!sending) { const done = brDone.size; closeBrowse(); if (done) setPickStatus(`Attached ${done} file${done === 1 ? "" : "s"} to your email.`, "ok"); } });
 $("brBack").addEventListener("click", () => { if (!sending && brStack.length > 1) { brStack.pop(); browseLoad(); } });
 $("brGo").addEventListener("click", attachBrowsed);
@@ -1527,6 +1552,7 @@ function markSaved(snap) { // lets the send-time prompt know this draft has been
 }
 
 $("folder").addEventListener("change", () => { if (job && !sending) checkDuplicate(); });
+for (const id of ["folder", "attFolder"]) { $(id).addEventListener("mousedown", () => refreshFolders("folder box opened")); $(id).addEventListener("focus", () => refreshFolders("folder box opened")); }
 
 let lastResult = null; // the outcome of the latest save
 $("send").addEventListener("click", async () => {
@@ -2064,7 +2090,7 @@ $("wbClearBtn").addEventListener("click", async () => {
     if (pendingRefresh) { pendingRefresh = false; refreshForItem(true); }
   }
 });
-$("wbAttachBtn").addEventListener("click", () => { if (!sending) openPicker(); });
+$("wbAttachBtn").addEventListener("click", () => { if (!sending) { refreshFolders("attach opened"); openPicker(); } });
 $("pickFolder").addEventListener("change", () => { if (!sending) { $("pickQ").value = ""; loadPickList(); } });
 let pickTimer = null;
 $("pickQ").addEventListener("input", () => { clearTimeout(pickTimer); pickTimer = setTimeout(() => { if (!sending) runPickSearch(); }, 300); });
