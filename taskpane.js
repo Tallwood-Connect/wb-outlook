@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.87"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.88"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -1088,14 +1088,14 @@ function releaseConvLock(lock) { if (lock) lockCall("/lock/release", { key: lock
 
 // Adds this email to its conversation PDF (if there is one in the job) and draws the whole thing again.
 // Returns { bytes, old } where `old` is the earlier PDF to be replaced. Throws if anything is unusual: the caller then saves a normal PDF.
-async function buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId, docs, outlookFolderId, emlName, topLink }) {
+async function buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId, docs, outlookFolderId, emlName, topLink, exactPics }) {
   const T = window.WBThread, L = window.PDFLib;
   if (!T || !L || !L.PDFDocument) throw new Error("the conversation tools did not load");
   const hdr = snap.compose ? {} : await readThreadHeaders();
   const me = String((Office.context.mailbox.userProfile && Office.context.mailbox.userProfile.emailAddress) || "").toLowerCase();
   const fromAddr = (snap.from && snap.from.emailAddress) || "";
   const list = (a) => (a || []).map((x) => x.displayName || x.emailAddress).join(", ").slice(0, 300);
-  const cid = buildCidMap(bodyHtml, inl);
+  const cid = buildCidMap(bodyHtml, inl, (m) => diag("pictures", m), exactPics);
   const mkEntry = (t) => { // this email as an entry of the record
     let html = T.sanitize(prepBody(t.html, cid, true), { scope: "m" + hash40(id).slice(0, 8) }); // the email's own styles apply only inside its own block, so they cannot change the rest of the PDF
     if (html.length > 2500000) html = html.replace(/<img\b[^>]*\bsrc\s*=\s*["']?data:[^>]*>/gi, '<span style="color:#888;font-size:11px">[picture not included]</span>');
@@ -1624,7 +1624,7 @@ $("send").addEventListener("click", async () => {
       convLock = await acquireConvLock(`${jobAtSend._id}:${hash40(window.WBThread ? window.WBThread.subjectKey(subject) : String(subject))}`); // throws if someone else is updating it
       try {
         setStatus("Adding this email to its conversation PDF…", "busy");
-        const r = await buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId: jobAtSend._id, docs: nameDocs, outlookFolderId, emlName, topLink: wbLink(jobAtSend._id, folderId) });
+        const r = await buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId: jobAtSend._id, docs: nameDocs, outlookFolderId, emlName, topLink: wbLink(jobAtSend._id, folderId), exactPics });
         pdf = r.bytes; convOld = r.old; convUsed = true; convKeys = r.keys;
         if (r.old) pdfName = r.old.name; // the conversation PDF keeps its name
         diag("save", `conversation PDF: ${r.count} message(s)${r.old ? ", replacing the earlier one" : ", new"}`);
