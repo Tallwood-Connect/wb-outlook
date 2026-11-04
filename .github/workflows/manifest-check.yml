@@ -1,0 +1,36 @@
+# Runs on every push that touches the manifest or its register.
+# Fails (and GitHub emails the repo owner) if manifest.xml is changed without a matching register entry,
+# or if it loses anything the Archicad hand-over depends on.
+name: Manifest check
+on:
+  push:
+    paths:
+      - manifest.xml
+      - MANIFEST-SHA256.txt
+      - MANIFEST-VERSIONS.md
+      - .github/workflows/manifest-check.yml
+  workflow_dispatch:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check manifest against the register
+        run: |
+          set -u
+          fail=0
+          ver=$(grep -o '<Version>[^<]*' manifest.xml | head -1 | sed 's/<Version>//')
+          hash=$(sha256sum manifest.xml | cut -d' ' -f1)
+          echo "manifest.xml version $ver, SHA-256 $hash"
+          reg_hash=$(grep -o 'SHA-256: [0-9a-f]*' MANIFEST-SHA256.txt | sed 's/SHA-256: //')
+          reg_ver=$(grep -o 'Manifest version: [0-9.]*' MANIFEST-SHA256.txt | sed 's/Manifest version: //')
+          [ "$hash" = "$reg_hash" ] || { echo "::error::manifest.xml hash does not match MANIFEST-SHA256.txt ($reg_hash)"; fail=1; }
+          [ "$ver" = "$reg_ver" ] || { echo "::error::manifest.xml version $ver does not match MANIFEST-SHA256.txt ($reg_ver)"; fail=1; }
+          grep -q "| $ver | .*$hash" MANIFEST-VERSIONS.md || { echo "::error::MANIFEST-VERSIONS.md has no row for version $ver with this hash"; fail=1; }
+          # Archicad hand-over and permission rules (see claude/Integration Contracts.md)
+          grep -q 'LaunchEvent Type="OnNewMessageCompose" FunctionName="onNewMessageComposeHandler"' manifest.xml || { echo "::error::OnNewMessageCompose launch event missing"; fail=1; }
+          grep -q 'launchevent.html?v=1.28' manifest.xml || { echo "::error::launchevent.html ?v=1.28 URL missing"; fail=1; }
+          grep -q 'launchevent.js?v=1.28' manifest.xml || { echo "::error::launchevent.js ?v=1.28 URL missing"; fail=1; }
+          grep -q '<Permissions>ReadWriteItem</Permissions>' manifest.xml || { echo "::error::Permissions changed from ReadWriteItem (needs Jason's written approval)"; fail=1; }
+          grep -q '<Id>aabbef90-b8c4-49fb-81d6-4b3f273b47e3</Id>' manifest.xml || { echo "::error::add-in Id changed (it must never change)"; fail=1; }
+          exit $fail

@@ -5,16 +5,18 @@
   xmlns:mailappor="http://schemas.microsoft.com/office/mailappversionoverrides/1.0"
   xsi:type="MailApp">
   <Id>aabbef90-b8c4-49fb-81d6-4b3f273b47e3</Id>
-  <Version>1.0.0.15</Version>
+  <Version>1.0.0.16</Version>
   <ProviderName>Tallwood</ProviderName>
   <DefaultLocale>en-AU</DefaultLocale>
   <DisplayName DefaultValue="Send to Wunderbuild"/>
-  <Description DefaultValue="Upload the open email to a Wunderbuild job as an .eml file."/>
+  <Description DefaultValue="Save the open email, as a PDF and the original email file, and its attachments to a Wunderbuild job."/>
   <IconUrl DefaultValue="https://tallwood-connect.github.io/wb-outlook/assets/icon-64.png"/>
   <HighResolutionIconUrl DefaultValue="https://tallwood-connect.github.io/wb-outlook/assets/icon-128.png"/>
   <SupportUrl DefaultValue="https://www.wunderbuild.com"/>
   <AppDomains>
     <AppDomain>https://api.wunderbuild.com</AppDomain>
+    <AppDomain>https://preview.wunderbuild.com</AppDomain>
+    <AppDomain>https://wb-proxy.jason-984.workers.dev</AppDomain>
   </AppDomains>
   <Hosts><Host Name="Mailbox"/></Hosts>
   <Requirements><Sets><Set Name="Mailbox" MinVersion="1.1"/></Sets></Requirements>

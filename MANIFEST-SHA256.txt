@@ -1,0 +1,4 @@
+Send to Wunderbuild manifest.xml
+Manifest version: 1.0.0.16
+Issued: 3 Nov 2026
+SHA-256: 2242a9ceea989d23357bc0b4110dc7939d4f9e495140f6ff8f0114d8ff0c1800
