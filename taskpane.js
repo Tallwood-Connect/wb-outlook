@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.91"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.93"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -886,12 +886,39 @@ async function openPicker() {
     await loadPickList();
   } catch (e) { setPickStatus(e.message, "err"); sel.innerHTML = ""; sel.disabled = false; }
 }
+// Which file-storage sites Wunderbuild's signed links point at (host names only, never the link or the file), so the Worker's
+// allowed list (ALLOWED_STORAGE_HOSTS) can be set exactly and a change of storage is easy to see. Kept on this computer.
+const STORAGE_KEY = "wb_storage_hosts";
+function noteStorageHost(url, via) {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    const m = JSON.parse(store.get(STORAGE_KEY) || "{}");
+    const e = m[h] || { n: 0 };
+    m[h] = { n: e.n + 1, at: Date.now(), via };
+    const keys = Object.keys(m).sort((a, b) => m[b].at - m[a].at).slice(0, 12);
+    const keep = {}; for (const k of keys) keep[k] = m[k];
+    store.set(STORAGE_KEY, JSON.stringify(keep));
+  } catch { /* the note is only for the report */ }
+}
+// The Worker refuses a file link whose storage site is not on its allowed list and says so in plain words. Turn that into a short
+// message for the person, naming the site, so it is clear what to do (it is not a fault in the email or the add-in).
+async function proxyFileError(res, what, fallback) {
+  let text = ""; try { text = await res.text(); } catch { /* no body */ }
+  const m = /storage site (\S+) is not on/.exec(text);
+  if (res.status === 403 && m && /ALLOWED_STORAGE_HOSTS/.test(text)) {
+    diag("storage", `${what} stopped: ${m[1]} is not on the Worker's allowed list`);
+    return new Error(`${what} stopped: Wunderbuild now keeps files on ${m[1]}, which is not on the Worker's allowed list. Your email is fine. Send the Troubleshooter report to Jason: he adds ${m[1]} to ALLOWED_STORAGE_HOSTS in Cloudflare (Worker > Settings > Variables and Secrets), then try again.`);
+  }
+  return new Error(fallback(res.status));
+}
 // Downloads a file from a signed link, through the proxy when the storage site refuses the browser (CORS).
 async function fetchBytes(url) {
   let res;
+  let via = "direct";
   try { res = await fetch(url); }
-  catch { res = await fetch(base().replace(/\/api$/, "") + "/download", { headers: { "x-api-key": $("key").value.trim(), "x-download-url": url } }); }
-  if (!res.ok) throw new Error(`download failed (${res.status})`);
+  catch { via = "Worker"; res = await fetch(base().replace(/\/api$/, "") + "/download", { headers: { "x-api-key": $("key").value.trim(), "x-download-url": url } }); }
+  noteStorageHost(url, via);
+  if (!res.ok) throw via === "Worker" ? await proxyFileError(res, "Downloading a file", (st) => `download failed (${st})`) : new Error(`download failed (${res.status})`);
   return new Uint8Array(await res.arrayBuffer());
 }
 function addAttachment(b64, name) {
@@ -1425,18 +1452,20 @@ async function uploadFile(name, type, bytes, folderId, jobId = job._id) {
     docId = doc._id;
     if (!doc.uploadUrl) throw new Error("Wunderbuild did not return an upload URL.");
     const blob = new Blob([bytes], { type });
-    let put;
+    let put, upVia = "direct";
     try {
       put = await fetch(doc.uploadUrl, { method: "PUT", headers: { "Content-Type": type }, body: blob });
     } catch {
       // Storage blocked the browser (CORS): send the file through the proxy instead.
+      upVia = "Worker";
       put = await fetch(base().replace(/\/api$/, "") + "/upload", {
         method: "PUT",
         headers: { "x-api-key": $("key").value.trim(), "x-upload-url": doc.uploadUrl, "Content-Type": type },
         body: blob,
       });
     }
-    if (!put.ok) throw new Error(`Upload of ${name} failed (${put.status}).`);
+    noteStorageHost(doc.uploadUrl, upVia);
+    if (!put.ok) throw upVia === "Worker" ? await proxyFileError(put, `Saving ${name}`, (st) => `Upload of ${name} failed (${st}).`) : new Error(`Upload of ${name} failed (${put.status}).`);
     return doc;
   } catch (e) {
     if (docId) { try { await api(`/documents/job/${jobId}/${docId}`, { method: "DELETE" }); } catch { /* best effort */ } }
@@ -1909,6 +1938,13 @@ async function buildReport() {
   add(`Job: ${job ? `${fullJobNo(job)} ${job.name} (${job._id})` : "none chosen"}${jobAuto ? " (filled in automatically)" : ""}`);
   add(`Folders: ${$("folder").options.length} listed | email folder: ${$("folder").selectedOptions[0] ? $("folder").selectedOptions[0].text : "-"} | attachment folder: ${$("attFolder").selectedOptions[0] ? $("attFolder").selectedOptions[0].text : "-"}`);
   add(`Folder list failed: ${foldersFailed} | still loading: ${foldersPending} | Correspondence missing: ${corrMissing}`);
+  { // the file-storage sites seen in Wunderbuild's links (host names only)
+    let m = {}; try { m = JSON.parse(store.get(STORAGE_KEY) || "{}"); } catch { /* ignore */ }
+    const hs = Object.keys(m).sort((a, b) => m[b].at - m[a].at);
+    add(""); add("== FILE STORAGE SITES SEEN (for the Worker's allowed list) ==");
+    if (!hs.length) add("none yet: save an email or attach a Wunderbuild file, then make a new report");
+    for (const h of hs) add(`${h} | ${m[h].n} time(s) | last ${new Date(m[h].at).toLocaleString("en-AU")} | reached ${m[h].via === "Worker" ? "through the Worker" : "directly from Outlook"}`);
+  }
   { const out = (picLog || []); if (out.length) { add(""); add("== PICTURES IN THE LAST PDF =="); for (const l of out.slice(0, 40)) add(l); } }
   add(`Requests in progress: ${apiActive} | waiting: ${apiQueue.length} urgent + ${apiLowQueue.length} background`);
   add(`Already saved: ${dupFound}${savedAt ? ` (${savedAt.toLocaleString("en-AU")})` : ""}${repliedOnly ? " - because a reply was saved" : ""} | saving now: ${sending}`);
