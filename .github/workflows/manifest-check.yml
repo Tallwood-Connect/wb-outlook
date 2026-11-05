@@ -30,8 +30,8 @@ jobs:
           grep -q "| $ver | .*$hash" MANIFEST-VERSIONS.md || { echo "::error::MANIFEST-VERSIONS.md has no row for version $ver with this hash"; fail=1; }
           # Archicad hand-over and permission rules (see claude/Integration Contracts.md)
           grep -q 'LaunchEvent Type="OnNewMessageCompose" FunctionName="onNewMessageComposeHandler"' manifest.xml || { echo "::error::OnNewMessageCompose launch event missing"; fail=1; }
-          grep -q 'launchevent.html?v=1.28' manifest.xml || { echo "::error::launchevent.html ?v=1.28 URL missing"; fail=1; }
-          grep -q 'launchevent.js?v=1.28' manifest.xml || { echo "::error::launchevent.js ?v=1.28 URL missing"; fail=1; }
+          grep -q 'launchevent.html?v=1.29' manifest.xml || { echo "::error::launchevent.html ?v=1.29 URL missing"; fail=1; }
+          grep -q 'launchevent.js?v=1.29' manifest.xml || { echo "::error::launchevent.js ?v=1.29 URL missing"; fail=1; }
           grep -q '<Permissions>ReadWriteItem</Permissions>' manifest.xml || { echo "::error::Permissions changed from ReadWriteItem (needs Jason's written approval)"; fail=1; }
           grep -q '<Id>aabbef90-b8c4-49fb-81d6-4b3f273b47e3</Id>' manifest.xml || { echo "::error::add-in Id changed (it must never change)"; fail=1; }
           exit $fail

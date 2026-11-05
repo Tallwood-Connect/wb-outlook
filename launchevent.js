@@ -1,12 +1,12 @@
 /* Two automatic handlers (no button press needed):
    1. OnMessageSend (Outlook "Smart Alerts"): if the person has switched on "Ask me to save sent emails", it
-      offers to save the email to Wunderbuild first. Safety rule: anything unexpected lets the email send.
-      This must never trap an email.
+      offers to save the email to Wunderbuild first, but only when the email looks like it belongs to a job
+      (see wbJobSignal). Safety rule: anything unexpected lets the email send. This must never trap an email.
    2. OnNewMessageCompose: when Archicad's "Publish to Wunderbuild" opens a new email whose subject ends in
       "#wb-<code>", it fills that email in (recipients, subject, message above the Outlook signature, the
       published files attached from Wunderbuild). Every other new email is left untouched.
    Messages starting with [WB] go to the browser console, to help find problems. */
-const WB_LE_VERSION = "1.28";
+const WB_LE_VERSION = "1.29";
 const wbLog = (m) => { try { console.log(`[WB ${WB_LE_VERSION}] ${m}`); } catch (e) { /* no console */ } };
 wbLog("send-time script loaded");
 try { window.addEventListener("error", (e) => wbLog(`script error: ${e && e.message}`)); } catch (e) { /* not a browser page */ }
@@ -30,16 +30,57 @@ function onMessageSendHandler(event) {
       try {
         if (r.status !== Office.AsyncResultStatus.Succeeded) return done({ allowEvent: true }, "could not read draft properties");
         if (r.value.get("wbSaved") === true) return done({ allowEvent: true }, "already saved");
-        const block = () => done({
+        const block = (why) => done({
           allowEvent: false,
           errorMessage: "Would you like to save this email to Wunderbuild?",
           cancelLabel: "Send to Wunderbuild",
           commandId: "wbComposeButton",
-        }, "not saved yet");
-        block();
+        }, `not saved yet (${why})`);
+        // Ask only when the email looks like it belongs to a job. Any doubt (subject unreadable, no job list) asks, as before.
+        let convId = ""; try { convId = String(item.conversationId || ""); } catch (e) { convId = ""; }
+        const decide = (subject) => {
+          let v; try { v = wbJobSignal(subject, convId); } catch (e) { v = { ask: true, why: `check failed: ${e && e.message}` }; }
+          return v.ask ? block(v.why) : done({ allowEvent: true }, `no job signal (${v.why})`);
+        };
+        try {
+          if (!item.subject || typeof item.subject.getAsync !== "function") return decide(null);
+          item.subject.getAsync((sr) => decide(sr.status === Office.AsyncResultStatus.Succeeded ? sr.value : null));
+        } catch (e) { decide(null); }
       } catch (e) { done({ allowEvent: true }, `error: ${e && e.message}`); }
     });
   } catch (e) { done({ allowEvent: true }, `error: ${e && e.message}`); }
+}
+
+/* ---------- does this email look like it belongs to a job? ---------- */
+// Everything here reads only what this computer already holds (the task pane's saved job list and conversation
+// records), so it is instant and never calls Wunderbuild. Mirrors the rules in taskpane.js (norm, "- D" suffix).
+const WB_CONV_MAX_AGE = 90 * 864e5;
+const wbNorm = (s) => (s || "").toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/&/g, " and ").replace(/[^a-z0-9]+/g, " ").trim();
+function wbReadJson(k) { try { return JSON.parse(localStorage.getItem(k) || "null"); } catch (e) { return null; } }
+function wbJobSignal(subject, convId) {
+  // 1. a conversation this computer has already saved (the email replied to, or a reply to it)
+  if (convId) {
+    for (const k of ["wb_conv_" + convId, "wb_conv_reply_" + convId]) {
+      const r = wbReadJson(k);
+      if (r && (!r.at || Date.now() - r.at < WB_CONV_MAX_AGE)) return { ask: true, why: "thread saved before" };
+    }
+  }
+  if (subject == null) return { ask: true, why: "subject not readable" };
+  const raw = String(subject);
+  // 2. "J-" followed by a number
+  if (/(^|[^A-Za-z])J-\s?\d/i.test(raw)) return { ask: true, why: "job reference J-" };
+  // 3. a 4 or 5 digit number, or a project name, that matches a job in the saved list
+  const c = wbReadJson("wb_jobs_v2");
+  const jobs = c && Array.isArray(c.jobs) ? c.jobs : null;
+  if (!jobs || !jobs.length) return { ask: true, why: "no saved job list" };
+  const padded = " " + wbNorm(raw) + " ";
+  for (const j of jobs) {
+    const n = String(j.jobNumber == null ? "" : j.jobNumber).replace(/\D/g, "").replace(/^0+(?=\d)/, "");
+    if (n.length >= 4 && n.length <= 5 && new RegExp(`(^|[^0-9])0*${n}(?![0-9])`).test(raw)) return { ask: true, why: "job number " + n };
+    const name = wbNorm(String(j.name || "").replace(/\s*[-\u2013]\s*D\s*$/i, ""));
+    if (name.length >= 3 && padded.includes(" " + name + " ")) return { ask: true, why: "job name " + name };
+  }
+  return { ask: false, why: "no match" };
 }
 
 /* ---------- 2. Fill in an email prepared by Publish to Wunderbuild ---------- */

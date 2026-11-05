@@ -5,7 +5,7 @@
   xmlns:mailappor="http://schemas.microsoft.com/office/mailappversionoverrides/1.0"
   xsi:type="MailApp">
   <Id>aabbef90-b8c4-49fb-81d6-4b3f273b47e3</Id>
-  <Version>1.0.0.17</Version>
+  <Version>1.0.0.18</Version>
   <ProviderName>Tallwood</ProviderName>
   <DefaultLocale>en-AU</DefaultLocale>
   <DisplayName DefaultValue="Send to Wunderbuild"/>
@@ -116,9 +116,9 @@
         <bt:Urls>
           <bt:Url id="Taskpane.Url" DefaultValue="https://tallwood-connect.github.io/wb-outlook/taskpane.html"/>
           <bt:Url id="Compose.Url" DefaultValue="https://tallwood-connect.github.io/wb-outlook/taskpane.html"/>
-          <bt:Url id="Commands.Url" DefaultValue="https://tallwood-connect.github.io/wb-outlook/launchevent.html?v=1.28"/>
-          <bt:Url id="WebViewRuntime.Url" DefaultValue="https://tallwood-connect.github.io/wb-outlook/launchevent.html?v=1.28"/>
-          <bt:Url id="JSRuntime.Url" DefaultValue="https://tallwood-connect.github.io/wb-outlook/launchevent.js?v=1.28"/>
+          <bt:Url id="Commands.Url" DefaultValue="https://tallwood-connect.github.io/wb-outlook/launchevent.html?v=1.29"/>
+          <bt:Url id="WebViewRuntime.Url" DefaultValue="https://tallwood-connect.github.io/wb-outlook/launchevent.html?v=1.29"/>
+          <bt:Url id="JSRuntime.Url" DefaultValue="https://tallwood-connect.github.io/wb-outlook/launchevent.js?v=1.29"/>
         </bt:Urls>
         <bt:ShortStrings>
           <bt:String id="Group.Label" DefaultValue="Wunderbuild"/>
