@@ -11,6 +11,8 @@ on:
       - MANIFEST-VERSIONS.md
       - .github/workflows/manifest-check.yml
   workflow_dispatch:
+permissions:
+  contents: read # this check only reads the repo
 jobs:
   check:
     runs-on: ubuntu-latest
