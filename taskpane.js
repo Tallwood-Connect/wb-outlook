@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.93"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.94"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -305,17 +305,41 @@ async function applySubjectPrefix(remove, force) {
 }
 
 let searchRun = 0;
+// Typing in the search box answers from the job list saved on this PC at once (job details only; no folders, no waiting
+// for Wunderbuild). Wunderbuild is asked only when nothing saved matches, or when no list is saved yet.
+function localJobMatches(q) {
+  const words = wordsOf(q);
+  if (!words.length || !jobsCache) return null;
+  const digits = q.replace(/\D/g, "");
+  const hit = jobsCache.filter((j) => {
+    const c = j.client || {};
+    const hay = " " + norm([fullJobNo(j), j.jobNumber, j.name, j.address, j.city, c.firstName, c.lastName, c.businessName].filter(Boolean).join(" ")) + " ";
+    return words.every((w) => hay.includes(w) || (digits.length >= 3 && w === digits && String(j.jobNumber || "").replace(/\D/g, "").replace(/^0+/, "").includes(digits.replace(/^0+/, ""))));
+  });
+  return hit.slice(0, 15);
+}
 async function searchJobs() {
   const run = ++searchRun, q = $("q").value.trim();
   $("jobs").textContent = "";
   if (!q) { setStatus(""); return; }
   try {
-    setStatus("Searching…", "busy");
+    if (!jobsCache) { try { await loadAllJobsQuick(); } catch { /* no saved list yet: ask Wunderbuild below */ } }
+    if (run !== searchRun) return;
+    const local = localJobMatches(q);
+    if (local && local.length) { setStatus(""); renderJobList(local); loadAllJobs().catch(() => {}); return; } // quiet refresh if the list is old
+    setStatus(local ? "Not in the saved list. Checking Wunderbuild…" : "Searching…", "busy");
     const data = await api(`/jobs?page=1&limit=15&search=${encodeURIComponent(q)}`);
     if (run !== searchRun) return; // a newer search is running
     setStatus(data.result.length ? "" : "No jobs found.");
     renderJobList(data.result);
   } catch (e) { if (run === searchRun) setStatus(e.message, "err"); }
+}
+// Reads the saved job list from this PC without calling Wunderbuild.
+async function loadAllJobsQuick() {
+  try {
+    const c = JSON.parse(store.get(JOBS_KEY) || "null");
+    if (c && Array.isArray(c.jobs) && Date.now() - c.at < 864e5) { jobsCache = c.jobs; jobsAt = c.at; }
+  } catch { /* ignore bad saved copy */ }
 }
 
 /* ---------- match the email subject to a job ---------- */
