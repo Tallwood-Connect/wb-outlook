@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.94"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.95"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -310,13 +310,17 @@ let searchRun = 0;
 function localJobMatches(q) {
   const words = wordsOf(q);
   if (!words.length || !jobsCache) return null;
-  const digits = q.replace(/\D/g, "");
-  const hit = jobsCache.filter((j) => {
-    const c = j.client || {};
-    const hay = " " + norm([fullJobNo(j), j.jobNumber, j.name, j.address, j.city, c.firstName, c.lastName, c.businessName].filter(Boolean).join(" ")) + " ";
-    return words.every((w) => hay.includes(w) || (digits.length >= 3 && w === digits && String(j.jobNumber || "").replace(/\D/g, "").replace(/^0+/, "").includes(digits.replace(/^0+/, ""))));
-  });
-  return hit.slice(0, 15);
+  const digits = q.replace(/\D/g, "").replace(/^0+/, "");
+  // A search word must be the START of a word (so "han" finds Hann, not Chang or Shannon). Job number: any 3+ digit part.
+  const starts = (hay, w) => hay.some((x) => x.startsWith(w));
+  const fit = (j, fields) => {
+    const hay = wordsOf(fields(j).filter(Boolean).join(" "));
+    return words.every((w) => starts(hay, w) || (digits.length >= 3 && w === q.replace(/\D/g, "").replace(/^0+/, "") && String(j.jobNumber || "").replace(/\D/g, "").replace(/^0+/, "").includes(digits)));
+  };
+  // What the list shows (job number, name, address) comes first; client and city only if nothing shown matches.
+  const shown = jobsCache.filter((j) => fit(j, (x) => [fullJobNo(x), x.jobNumber, x.name, x.address]));
+  if (shown.length) return shown.slice(0, 15);
+  return jobsCache.filter((j) => fit(j, (x) => { const c = x.client || {}; return [x.city, c.firstName, c.lastName, c.businessName]; })).slice(0, 15);
 }
 async function searchJobs() {
   const run = ++searchRun, q = $("q").value.trim();
