@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.95"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.96"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -1921,8 +1921,10 @@ async function timedCheck(label, fn) {
     return `${label}: OK in ${Date.now() - t0} ms${out ? ` (${out})` : ""}${/PDF/.test(label) ? "" : ` [waited ${apiLast.wait} ms in line, answered in ${apiLast.took} ms]`}`;
   } catch (e) { return `${label}: FAILED after ${Date.now() - t0} ms - ${describeError(e)}`; }
 }
+let diagStep = ""; // what the report is doing right now (shown with a running timer)
 async function buildReport() {
   const L = [], add = (s = "") => L.push(s);
+  diagStep = "Reading Outlook and add-in details";
   const key = $("key").value.trim();
   const safe = (t) => { let o = String(t); if (key) o = o.split(key).join("[key]"); return o; }; // the key can never end up in the report
   const now = new Date();
@@ -1993,14 +1995,19 @@ async function buildReport() {
   add(); add("== CONNECTION CHECKS ==");
   if (!key) add("Skipped: no API key is set.");
   else {
+    diagStep = "Check 1 of 3: Wunderbuild job list (up to 20 s)";
     add(await timedCheck("Wunderbuild job list", async () => { const d = await api("/jobs?page=1&limit=1"); return `${(d.pagination && d.pagination.totalCount) || (d.result || []).length} job(s) reported`; }));
+    diagStep = "Check 2 of 3: folders of the chosen job (up to 20 s)";
     if (job) add(await timedCheck("Folders of the chosen job", async () => { const d = await api(`/documents/job/${job._id}/folders`); return `${(d.subFolders || []).length} top-level folders`; }));
     else add("Folders of the chosen job: skipped (no job chosen)");
+    diagStep = "Check 3 of 3: PDF service";
     add(await timedCheck("PDF service", async () => { const b = await renderPdf("<p>test</p>"); return `${b.length} bytes`; }));
   }
 
   add(); add("== SPEED TEST (where the time goes) ==");
-  try {
+  if ($("diagSkipSpeed").checked) add("Skipped: the speed test was switched off for this report.");
+  else try {
+    diagStep = "Speed test: Worker only";
     const root = base().replace(/\/api\/?$/, "");
     const one = async (url, init) => {
       const t0 = performance.now();
@@ -2021,11 +2028,11 @@ async function buildReport() {
         add(`   ${label}: fastest ${v[0]} ms | middle ${v[Math.floor(v.length / 2)]} ms | average ${Math.round(v.reduce((x, y) => x + y, 0) / v.length)} ms | slowest ${v[v.length - 1]} ms | ${v.length} answered${fails ? `, ${fails} failed` : ""}`);
       };
       add("B. Through the Worker to Wunderbuild, with the key (8 calls one after another each):");
-      const jt = []; for (let i = 0; i < 8; i++) jt.push(await timed(`${base()}/jobs?page=1&limit=1`));
+      const jt = []; for (let i = 0; i < 8; i++) { diagStep = `Speed test: job list call ${i + 1} of 8 (each can take up to 30 s)`; jt.push(await timed(`${base()}/jobs?page=1&limit=1`)); }
       stats("Job list", jt, jt.filter((x) => x === null).length);
       add(`   each: ${jt.map((x) => (x === null ? "failed" : x + " ms")).join(", ")}`);
       if (job) {
-        const ft = []; for (let i = 0; i < 8; i++) ft.push(await timed(`${base()}/documents/job/${job._id}/folders`));
+        const ft = []; for (let i = 0; i < 8; i++) { diagStep = `Speed test: folder call ${i + 1} of 8 (each can take up to 30 s)`; ft.push(await timed(`${base()}/documents/job/${job._id}/folders`)); }
         stats("Folders of the chosen job", ft, ft.filter((x) => x === null).length);
         add(`   each: ${ft.map((x) => (x === null ? "failed" : x + " ms")).join(", ")}`);
       }
@@ -2037,6 +2044,7 @@ async function buildReport() {
     } catch { /* ignore */ }
   } catch (e) { add(`Speed test could not run: ${describeError(e)}`); }
 
+  diagStep = "Finishing the report";
   add(); add("== RECENT ACTIVITY (oldest first) ==");
   if (!diagLog.length) add("Nothing recorded yet.");
   for (const e of diagLog) add(`${hms(e.t)}  [${e.k}] ${e.m}`);
@@ -2045,13 +2053,16 @@ async function buildReport() {
 }
 $("diagRun").addEventListener("click", async () => {
   $("diagRun").disabled = true; $("diagBtns").hidden = true;
-  $("diagNote").className = "busy"; $("diagNote").textContent = "Collecting information. This takes a few seconds…";
+  $("diagSkipSpeed").disabled = true;
+  const t0 = Date.now(), tick = () => { $("diagNote").className = "busy"; $("diagNote").textContent = `Working: ${diagStep || "starting"}… ${Math.round((Date.now() - t0) / 1000)} s so far. ${$("diagSkipSpeed").checked ? "" : "The speed test can take several minutes when Wunderbuild is slow."}`; };
+  diagStep = ""; tick(); const timer = setInterval(tick, 1000);
   try {
     diagText = await buildReport();
     $("diagOut").value = diagText;
-    $("diagNote").className = "ok"; $("diagNote").textContent = `Report ready (${diagText.split("\n").length} lines). Choose what to do with it:`;
+    $("diagNote").className = "ok"; $("diagNote").textContent = `Report ready after ${Math.round((Date.now() - t0) / 1000)} s (${diagText.split("\n").length} lines). Choose what to do with it:`;
     $("diagBtns").hidden = false;
   } catch (e) { $("diagNote").className = "err"; $("diagNote").textContent = `Could not collect the information: ${describeError(e)}`; }
+  clearInterval(timer); $("diagSkipSpeed").disabled = false;
   $("diagRun").disabled = false;
 });
 $("diagEmail").addEventListener("click", () => {
