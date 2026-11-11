@@ -6,7 +6,7 @@
       "#wb-<code>", it fills that email in (recipients, subject, message above the Outlook signature, the
       published files attached from Wunderbuild). Every other new email is left untouched.
    Messages starting with [WB] go to the browser console, to help find problems. */
-const WB_LE_VERSION = "1.29";
+const WB_LE_VERSION = "1.30";
 const wbLog = (m) => { try { console.log(`[WB ${WB_LE_VERSION}] ${m}`); } catch (e) { /* no console */ } };
 wbLog("send-time script loaded");
 try { window.addEventListener("error", (e) => wbLog(`script error: ${e && e.message}`)); } catch (e) { /* not a browser page */ }
@@ -69,16 +69,24 @@ function wbJobSignal(subject, convId) {
   const raw = String(subject);
   // 2. "J-" followed by a number
   if (/(^|[^A-Za-z])J-\s?\d/i.test(raw)) return { ask: true, why: "job reference J-" };
-  // 3. a 4 or 5 digit number, or a project name, that matches a job in the saved list
+  // 3. the saved job list. Stricter than before so ordinary emails are not interrupted:
+  //    - a bare 4 or 5 digit number counts only next to "job", "project", "#J" or "No."/"#"
+  //    - a name of two or more words counts on its own
+  //    - a one-word name counts only with a second clue: its own job number, or the word job/project/site
   const c = wbReadJson("wb_jobs_v2");
   const jobs = c && Array.isArray(c.jobs) ? c.jobs : null;
   if (!jobs || !jobs.length) return { ask: true, why: "no saved job list" };
   const padded = " " + wbNorm(raw) + " ";
+  const hasWord = /(^|[^a-z])(job|project|site)([^a-z]|$)/i.test(raw);
   for (const j of jobs) {
     const n = String(j.jobNumber == null ? "" : j.jobNumber).replace(/\D/g, "").replace(/^0+(?=\d)/, "");
-    if (n.length >= 4 && n.length <= 5 && new RegExp(`(^|[^0-9])0*${n}(?![0-9])`).test(raw)) return { ask: true, why: "job number " + n };
+    const numHit = n.length >= 4 && n.length <= 5 && new RegExp(`(^|[^0-9])0*${n}(?![0-9])`).test(raw);
+    if (numHit && (hasWord || /#\s?j?\s?0*\d/i.test(raw) || /\bno\.?\s*0*\d/i.test(raw))) return { ask: true, why: "job number " + n };
     const name = wbNorm(String(j.name || "").replace(/\s*[-\u2013]\s*D\s*$/i, ""));
-    if (name.length >= 3 && padded.includes(" " + name + " ")) return { ask: true, why: "job name " + name };
+    if (name.length >= 3 && padded.includes(" " + name + " ")) {
+      if (name.includes(" ")) return { ask: true, why: "job name " + name };
+      if (numHit || hasWord) return { ask: true, why: "job name " + name + " with a second clue" };
+    }
   }
   return { ask: false, why: "no match" };
 }
