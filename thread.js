@@ -281,6 +281,30 @@
     }
     return doc.head.innerHTML.replace(/<(?!\/?style\b)[^>]*>/gi, "") + body.innerHTML;
   }
+  /* A picture that appears in several emails (a signature logo) is written into the page once: each use becomes a small placeholder
+     <img> that CSS fills with the shared picture. The record kept inside the PDF is not changed, only the page that is drawn. This keeps
+     the page small (the Worker and the PDF service have limits on its size) and the drawing identical. */
+  function dedupePictures(html) {
+    const re = /<img\b[^>]*>/gi, uris = new Map();
+    const srcOf = (tag) => { const m = /\ssrc\s*=\s*("(data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+\/=]+)"|'(data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+\/=]+)')/i.exec(tag); return m ? { whole: m[1], uri: m[2] || m[3] } : null; };
+    let m;
+    while ((m = re.exec(html))) { const s = srcOf(m[0]); if (s && s.uri.length > 3000) uris.set(s.uri, (uris.get(s.uri) || 0) + 1); }
+    const shared = new Map(); let n = 0;
+    for (const [u, c] of uris) if (c > 1) shared.set(u, "wbp" + n++);
+    if (!shared.size) return { html, css: "" };
+    const blank = "data:image/gif;base64,R0lGODlhAQABAAAAACw=";
+    const out = html.replace(re, (tag) => {
+      const s = srcOf(tag); const cls = s && shared.get(s.uri);
+      if (!cls) return tag;
+      let t = tag.replace(s.whole, `"${blank}"`);
+      if (/\sclass\s*=\s*"/i.test(t)) t = t.replace(/(\sclass\s*=\s*")/i, `$1${cls} `);
+      else if (/\sclass\s*=\s*'/i.test(t)) t = t.replace(/(\sclass\s*=\s*')/i, `$1${cls} `);
+      else t = t.replace(/^<img\b/i, `<img class="${cls}"`);
+      return t;
+    });
+    let css = ""; for (const [u, cls] of shared) css += `img.${cls}{content:url(${u})}`;
+    return { html: out, css };
+  }
   /* A straight run of replies stays at one level. Only where a message was answered more than once does each
      answer get its own indented branch, with a line down the side. */
   const LINES = ["#8FA3B8", "#9BB89B", "#C5A56B", "#B58FB8"];
@@ -297,7 +321,7 @@
       else for (const c of k) h += `<div style="margin:0 0 6px 10px;padding-left:14px;border-left:3px solid ${LINES[(depth + k.indexOf(c)) % LINES.length]}">${draw(c, depth + 1)}</div>`;
       return h;
     };
-    const body = roots.map((r) => draw(r, 0)).join("");
+    const { html: body, css: picCss } = dedupePictures(roots.map((r) => draw(r, 0)).join(""));
     const first = order.length ? fmtWhen(order[0].at).replace(/, \d+:\d+ [ap]m$/i, "") : "", last = order.length ? fmtWhen(order[order.length - 1].at).replace(/, \d+:\d+ [ap]m$/i, "") : "";
     const branched = [...kids.values()].some((k) => k.length > 1);
     return `<!doctype html><html><head><meta charset="utf-8">` +
@@ -306,7 +330,7 @@
       `.eb img{max-width:100%!important;height:auto!important}` + // pictures keep their proportions
       `.eb *{break-inside:auto!important;page-break-inside:auto!important;min-height:0!important}` + // long emails flow across pages without gaps
       `.eb div:empty,.eb p:empty{display:none!important}` +
-      `.eb p[class*=MsoNormal],.eb li[class*=MsoNormal]{margin:0}</style></head>` +
+      `.eb p[class*=MsoNormal],.eb li[class*=MsoNormal]{margin:0}${picCss}</style></head>` +
       `<body style="margin:0"><div style="font:13px Arial,Helvetica,sans-serif;border-bottom:2px solid #333;padding-bottom:8px;margin-bottom:16px">` +
       `<div style="font-size:11px;letter-spacing:1px;color:#777;text-transform:uppercase">Email conversation</div>` +
       `<div style="font-size:19px;font-weight:bold;margin:2px 0 4px">${esc(meta.subject || "(No subject)")}</div>` +
