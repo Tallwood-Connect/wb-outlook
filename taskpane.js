@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.99"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.100"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -42,7 +42,16 @@ function findNamedOption(options, name) {
 const isPdfDoc = (d) => /\.pdf$/i.test((d && d.name) || ""), isEmlDoc = (d) => /\.eml$/i.test((d && d.name) || "");
 let repliedOnly = false; // filed because a reply to it was saved
 let foldersFailed = false, foldersPending = false; // the job's folder list could not be loaded
+let savedBy = ""; // who filed it, when Wunderbuild says (or this PC remembers saving it itself)
 let dupFound = false, savedAt = null, attOpen = false; // savedAt: when the email was filed; attOpen: "Save Attachments Only" pressed
+function docSavedBy(d) { // Wunderbuild may name the creator under a few different fields; a name is shown only if one is there
+  for (const k of ["createdBy", "uploadedBy", "creator", "user", "owner", "author"]) {
+    const v = d && d[k];
+    if (typeof v === "string" && v && !/^[0-9a-f]{24}$/i.test(v)) return v.slice(0, 40);
+    if (v && typeof v === "object") { const n = v.name || v.fullName || [v.firstName, v.lastName].filter(Boolean).join(" ") || v.displayName; if (n) return String(n).slice(0, 40); }
+  }
+  return "";
+}
 const fmtSaved = (d) => d.toLocaleString("en-AU", { weekday: "short", day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
 // Wunderbuild documents do not report a creation time here, but their ids (MongoDB ObjectIds) start with one.
 function docSavedAt(d) {
@@ -68,7 +77,7 @@ function refreshSend() {
   // Already filed: hide the saving settings; "Save Attachments Only" brings back the attachment ones.
   const filed = dupFound && !compose;
   $("main").className = filed ? (attOpen ? "filed attopen" : "filed") : "";
-  $("savedNote").textContent = filed ? (savedAt ? `${repliedOnly ? "Reply saved" : "Saved"} to Wunderbuild on ${fmtSaved(savedAt)}` : "Already saved to Wunderbuild") : "";
+  $("savedNote").textContent = filed ? (savedAt ? `${repliedOnly ? "Reply saved" : "Saved"} to Wunderbuild on ${fmtSaved(savedAt)}${savedBy ? ` by ${savedBy}` : ""}` : "Already saved to Wunderbuild") : "";
   $("attOnlyBtn").hidden = !(filed && !attOpen && currentAtts.length > 0);
 }
 
@@ -1188,17 +1197,18 @@ async function lockCall(path, body) {
   if (!res.ok) throw new Error(`lock service status ${res.status}`);
   return res.json();
 }
+const myFirstName = () => { try { return String(Office.context.mailbox.userProfile.displayName || "").trim().split(/[\s,]+/)[0].slice(0, 30); } catch (e) { return ""; } }; // shown to a colleague who has to wait
 const LOCK_WAIT_MS = 90000, LOCK_RENEW_MS = 15000; // a save can take a minute when Wunderbuild is slow: wait that long, and keep the lock alive while saving
 async function acquireConvLock(key, what = "this email conversation's PDF") { // { key, owner }, or null when there is no lock service; throws if someone else keeps it for too long
   if (/\/\/api\.wunderbuild\.com/i.test(base())) return null;
-  const owner = newId(), t0 = Date.now();
+  const owner = newId(), t0 = Date.now(), name = myFirstName();
   for (;;) {
     let r;
-    try { r = await lockCall("/lock", { key, owner }); } catch (e) { diag("save", `no lock: ${e.message}`); return null; }
-    if (r && r.ok) { const lock = { key, owner, timer: setInterval(() => { lockCall("/lock", { key, owner }).catch(() => {}); }, LOCK_RENEW_MS) }; return lock; } // the Worker lock ends by itself after 45 s, so it is renewed while this save runs
+    try { r = await lockCall("/lock", { key, owner, name }); } catch (e) { diag("save", `no lock: ${e.message}`); return null; }
+    if (r && r.ok) { const lock = { key, owner, timer: setInterval(() => { lockCall("/lock", { key, owner, name }).catch(() => {}); }, LOCK_RENEW_MS) }; return lock; } // the Worker lock ends by itself after 45 s, so it is renewed while this save runs
     const waited = Math.round((Date.now() - t0) / 1000);
     if (Date.now() - t0 > LOCK_WAIT_MS) throw new Error(`Someone else has been updating ${what} for over ${Math.round(LOCK_WAIT_MS / 1000)} seconds, so nothing was saved. Please wait a minute and try again.`);
-    setStatus(`Someone else is saving ${what}: waiting for them to finish (${waited} s so far, up to ${Math.round(LOCK_WAIT_MS / 1000)} s)…`, "busy");
+    setStatus(`${r && r.name ? r.name : "Someone else"} is saving ${what}: waiting for them to finish (about ${Math.max(1, Number(r && r.seconds) || 1)} s left on their hold; ${waited} s waited, up to ${Math.round(LOCK_WAIT_MS / 1000)} s)…`, "busy");
     await sleep(1500);
   }
 }
@@ -1223,6 +1233,7 @@ async function buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId, d
       from: (snap.from && (snap.from.displayName || snap.from.emailAddress)) || "Unknown", fromAddr, to: list(snap.to), cc: list(snap.cc),
       atts: (snap.attachments || []).filter((a) => !a.isInline).map((a) => a.name), html,
       hashes: T.hashesOf(t.full), pairs: T.pairsOf(t.full), quote: t.quote, quoteCount: t.quoteCount, quoteRatio: t.quoteRatio,
+      convId: String(snap.conversationId || "").slice(0, 200),
       msgId: hdr.msgId || String(snap.internetMessageId || "").trim(), inReplyTo: hdr.inReplyTo || "", refs: hdr.refs || [],
       link: outlookFolderId ? wbLink(jobId, outlookFolderId) : "", emlName: emlName || "",
     };
@@ -1382,7 +1393,7 @@ function rememberSaved(id, jobId, savedMs) { notSavedAt.delete(id + "_" + jobId)
 function forgetSaved(id, jobId) { store.remove(savedMarkKey(id, jobId)); }
 
 let dupRun = 0, justSaved = null; // justSaved = id of the job this email was just saved to
-function resetDup() { dupRun++; dupFound = false; repliedOnly = false; savedAt = null; attOpen = false; $("dupNote").className = ""; $("dupNote").textContent = ""; }
+function resetDup() { dupRun++; savedBy = ""; dupFound = false; repliedOnly = false; savedAt = null; attOpen = false; $("dupNote").className = ""; $("dupNote").textContent = ""; }
 async function checkDuplicate() {
   resetDup(); refreshSend();
   const run = dupRun, forJob = job, item = cur, note = $("dupNote");
@@ -1415,6 +1426,8 @@ async function checkDuplicate() {
       dupFound = both; // received emails show a green "Sent to Wunderbuild" button instead of a message
       if (both) {
         savedAt = found.map(docSavedAt).filter(Boolean).sort((a, b) => a - b)[0] || null;
+        savedBy = found.map(docSavedBy).find(Boolean) || "";
+        diag("save", `saved file fields from Wunderbuild: ${Object.keys(found[0] || {}).slice(0, 25).join(", ")} | saved-by name: ${savedBy || "not reported"}`);
         for (const row of $("attList").children) row.children[0].checked = false; // already filed: tick one again to save it separately
       }
       if (isCompose()) note.textContent = both ? "This email was already saved to Wunderbuild. Save and send will update the saved copy, then send it." : "Part of this email was saved earlier. Save and send will save it again.";
@@ -1838,7 +1851,10 @@ $("send").addEventListener("click", async () => {
         pdf = r.bytes; convOld = r.old; convUsed = true; convKeys = r.keys;
         if (r.old) pdfName = r.old.name; // the conversation PDF keeps its name
         diag("save", `conversation PDF: ${r.count} message(s)${r.old ? ", replacing the earlier one" : ", new"}`);
-      } catch (e) { diag("save", `conversation PDF not used: ${e && e.message}`); }
+      } catch (e) {
+        diag("save", `conversation PDF not used: ${e && e.message}`);
+        notes.push("this email was saved on its own, not added to its conversation PDF, so it may show as a separate PDF (reason: " + String((e && e.message) || "unknown").replace(/\.$/, "").slice(0, 120) + ")");
+      }
     }
     if (useFmt && needPdf && !pdf) {
       try {
@@ -1928,7 +1944,7 @@ $("send").addEventListener("click", async () => {
     if (atts.length) msg += ` ${savedAtts} of ${atts.length} attachment${atts.length === 1 ? "" : "s"} in ${perFile ? "the chosen folders" : attFolderLabel}.`;
     if (notes.length) msg += ` Note: ${notes.join("; ")}.`;
     if (problems.length) msg += ` Problems: ${problems.join("; ")}.`;
-    if (!snap.compose && !problems.length) { dupFound = true; if (!savedAt) savedAt = new Date(); } // everything saved: the button turns into the green "Sent to Wunderbuild"
+    if (!snap.compose && !problems.length) { dupFound = true; if (!savedAt) savedAt = new Date(); if (!savedBy) savedBy = myFirstName(); } // everything saved: the button turns into the green "Sent to Wunderbuild"
     const wantSend = snap.compose; // a draft is always sent as it is saved, so the saved copy matches what went out
     if (wantSend && problems.length) {
       msg = `Saved, but not sent. ${msg} The email has NOT been sent because of the problems above. Fix them and press Save and send again (the saved copy is replaced, not added twice), or send it yourself.`;

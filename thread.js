@@ -396,6 +396,7 @@ const threadKeys = (e) => [...new Set([e.msgId, e.inReplyTo, ...(e.refs || [])].
 function belongs(meta, e) {
   if (meta.entries.some((x) => x.id === e.id)) return true; // the same email saved again
   const ids = new Set(meta.entries.map((x) => x.msgId).filter(Boolean));
+  if (e.convId && meta.entries.some((x) => x.convId && x.convId === e.convId)) return true; // Outlook's own conversation id matches an email in the record (second link, for replies whose headers cannot be read)
   if (threadKeys(e).some((k) => ids.has(k) && k !== e.msgId)) return true; // it answers (or follows) a message in the record
   if (e.msgId && meta.entries.some((x) => (x.refs || []).includes(e.msgId) || x.inReplyTo === e.msgId)) return true; // a message in the record answers it
   return (e.quoteCount || 0) >= 2 && (e.quoteRatio || 0) >= 0.6; // most of what it quotes is already in the record
