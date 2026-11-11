@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.96"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.97"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -96,6 +96,7 @@ const apiSlot = (low) => new Promise((go) => { (low ? apiLowQueue : apiQueue).pu
 const apiFree = (low) => { apiActive--; if (low) apiLowActive--; apiPump(); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const plainError = (t) => String(t || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
+const API_TIMEOUT_MS = 50000; // the Worker gives up on Wunderbuild at 40 s and says so; this is the add-in's own last limit
 async function api(path, opts = {}) {
   const low = !!opts.low; if (low) { opts = { ...opts }; delete opts.low; }
   const key = $("key").value.trim();
@@ -108,10 +109,15 @@ async function api(path, opts = {}) {
     const began = Date.now(), waited = began - queuedAt;
     try {
       res = await fetch(base() + path, {
+        signal: AbortSignal.timeout(API_TIMEOUT_MS), // never wait for ever: a stuck request would freeze the panel
         ...opts,
         headers: { "x-api-key": key, "Content-Type": "application/json", ...(opts.headers || {}) },
       });
     } catch (err) {
+      if (err && (err.name === "TimeoutError" || err.name === "AbortError")) {
+        diag("network", `${opts.method || "GET"} ${path.split("?")[0]} gave no answer in ${Math.round((Date.now() - began) / 1000)} s`);
+        throw new Error(`Wunderbuild did not answer in ${Math.round(API_TIMEOUT_MS / 1000)} seconds (it may be busy). Nothing was lost: wait a minute and try again.`);
+      }
       diag("network", `${opts.method || "GET"} ${path.split("?")[0]} failed after ${Date.now() - began} ms (${err && err.message})`);
       throw new Error(`Request to ${base()}${path.split("?")[0]} was blocked or failed (${err && err.message}). Check the API base URL and the proxy settings.`);
     } finally { apiFree(low); }
@@ -126,6 +132,7 @@ async function api(path, opts = {}) {
         continue;
       }
     }
+    if (res.status === 502 || res.status === 504) throw new Error(plainError(await res.text()) || "Wunderbuild did not answer in time. Wait a minute and try again.");
     if (!res.ok) throw new Error(res.status === 429 ? "Wunderbuild is busy (too many requests). Wait a few seconds and try again." : `Wunderbuild returned ${res.status}: ${plainError(await res.text())}`);
     return res.status === 204 ? null : res.json();
   }
@@ -1052,8 +1059,26 @@ $("brBack").addEventListener("click", () => { if (!sending && brStack.length > 1
 $("brGo").addEventListener("click", attachBrowsed);
 
 // Email header block + the email's own HTML. Scripts are removed, and inline (cid:) images are embedded.
+// A tag that is never closed ("<p" or "<img" with no ">" before the next "<") is turned into plain text. Without this, the pattern matching below
+// has to look to the end of the email from every such tag, which takes seconds on a large badly formed email (time grows with the square of its size).
+const tidyTagSoup = (html) => String(html || "").replace(/<[^<>]*(?=<|$)/g, (m) => "&lt;" + m.slice(1));
+// Removes <script>…</script> blocks in one pass (an unclosed script runs to the end, as a browser reads it).
+function dropScripts(html) {
+  const lower = html.toLowerCase();
+  let out = "", pos = 0;
+  for (;;) {
+    const i = lower.indexOf("<script", pos);
+    if (i < 0) break;
+    out += html.slice(pos, i);
+    const j = lower.indexOf("</script", i + 7);
+    if (j < 0) { pos = html.length; break; }
+    const k = html.indexOf(">", j);
+    pos = k < 0 ? html.length : k + 1;
+  }
+  return out + html.slice(pos);
+}
 function prepBody(bodyHtml, cid, noStyle) { // the email's own HTML made ready for a PDF
-  let body = String(bodyHtml || "").replace(/<script[\s\S]*?<\/script>/gi, "");
+  let body = tidyTagSoup(dropScripts(String(bodyHtml || "")));
   body = body.replace(/cid:([^"'\s)>]+)/gi, (m, id) => (cid && (cid.get(id.toLowerCase()) || cid.get(id.split("@")[0].toLowerCase()))) || m);
   // Outlook on the web puts a 1-pixel placeholder in src and keeps the real picture in originalsrc (or names its attachment in data-custom).
   // Each picture is given its real source; one that cannot be found becomes a short note, because a placeholder stretched to the
@@ -1122,7 +1147,18 @@ const haveWin = (k) => typeof window !== "undefined" && !!window[k];
 const loadThreadTool = () => loadTool("thread.js", () => haveWin("WBThread"));
 const loadConvTools = () => Promise.all([loadThreadTool(), loadTool("pdf-lib.min.js", () => haveWin("PDFLib") && !!window.PDFLib.PDFDocument)]);
 const parseMsgIds = (s) => String(s || "").match(/<[^>]+>/g) || [];
-function readThreadHeaders() { // Message-ID, In-Reply-To and References of the open email, when this Outlook can give them
+// Message-ID, In-Reply-To and References of the open email. Outlook only gives these through item.internetHeaders for an email being written,
+// so for a received email they are read from the exported .eml the add-in already has in hand (emlBytes). Records where they came from.
+async function readThreadHeaders(emlBytes) {
+  let h = await readThreadHeadersFromOutlook(), from = "Outlook";
+  if (!(h.inReplyTo || (h.refs && h.refs.length)) && emlBytes) { try { await loadTool("mime.js", () => haveWin("WBMime")); } catch { /* tried below */ } }
+  if (!(h.inReplyTo || (h.refs && h.refs.length)) && emlBytes && window.WBMime && window.WBMime.headers) {
+    try { const e = window.WBMime.headers(emlBytes); const mine = { msgId: parseMsgIds(e.msgId)[0] || "", inReplyTo: parseMsgIds(e.inReplyTo)[0] || "", refs: parseMsgIds(e.references) }; if (mine.msgId || mine.inReplyTo || mine.refs.length) { h = mine; from = "the exported email"; } else from = ""; } catch { from = ""; }
+  } else if (!(h.msgId || h.inReplyTo || (h.refs && h.refs.length))) from = "";
+  diag("save", from ? `conversation links read from ${from}: reply-to ${h.inReplyTo ? "yes" : "no"}, references ${h.refs && h.refs.length ? h.refs.length : 0}` : "conversation links: none could be read (only the quoted text can join this email to its conversation)");
+  return h;
+}
+function readThreadHeadersFromOutlook() {
   return new Promise((resolve) => {
     const it = Office.context.mailbox.item;
     if (!it || !it.internetHeaders || typeof it.internetHeaders.getAsync !== "function") return resolve({});
@@ -1152,26 +1188,28 @@ async function lockCall(path, body) {
   if (!res.ok) throw new Error(`lock service status ${res.status}`);
   return res.json();
 }
-async function acquireConvLock(key) { // { key, owner }, or null when there is no lock service; throws if someone else keeps it for too long
+const LOCK_WAIT_MS = 90000, LOCK_RENEW_MS = 15000; // a save can take a minute when Wunderbuild is slow: wait that long, and keep the lock alive while saving
+async function acquireConvLock(key, what = "this email conversation's PDF") { // { key, owner }, or null when there is no lock service; throws if someone else keeps it for too long
   if (/\/\/api\.wunderbuild\.com/i.test(base())) return null;
   const owner = newId(), t0 = Date.now();
   for (;;) {
     let r;
     try { r = await lockCall("/lock", { key, owner }); } catch (e) { diag("save", `no lock: ${e.message}`); return null; }
-    if (r && r.ok) return { key, owner };
-    if (Date.now() - t0 > 20000) throw new Error("Someone else is updating this email conversation's PDF right now, so nothing was saved. Please wait a minute and try again.");
-    setStatus("Someone else is updating this conversation's PDF… waiting a moment", "busy");
+    if (r && r.ok) { const lock = { key, owner, timer: setInterval(() => { lockCall("/lock", { key, owner }).catch(() => {}); }, LOCK_RENEW_MS) }; return lock; } // the Worker lock ends by itself after 45 s, so it is renewed while this save runs
+    const waited = Math.round((Date.now() - t0) / 1000);
+    if (Date.now() - t0 > LOCK_WAIT_MS) throw new Error(`Someone else has been updating ${what} for over ${Math.round(LOCK_WAIT_MS / 1000)} seconds, so nothing was saved. Please wait a minute and try again.`);
+    setStatus(`Someone else is saving ${what}: waiting for them to finish (${waited} s so far, up to ${Math.round(LOCK_WAIT_MS / 1000)} s)…`, "busy");
     await sleep(1500);
   }
 }
-function releaseConvLock(lock) { if (lock) lockCall("/lock/release", { key: lock.key, owner: lock.owner }).catch(() => {}); }
+function releaseConvLock(lock) { if (lock) { clearInterval(lock.timer); lockCall("/lock/release", { key: lock.key, owner: lock.owner }).catch(() => {}); } }
 
 // Adds this email to its conversation PDF (if there is one in the job) and draws the whole thing again.
 // Returns { bytes, old } where `old` is the earlier PDF to be replaced. Throws if anything is unusual: the caller then saves a normal PDF.
-async function buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId, docs, outlookFolderId, emlName, topLink, exactPics }) {
+async function buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId, docs, outlookFolderId, emlName, topLink, exactPics, emlBytes }) {
   const T = window.WBThread, L = window.PDFLib;
   if (!T || !L || !L.PDFDocument) throw new Error("the conversation tools did not load");
-  const hdr = snap.compose ? {} : await readThreadHeaders();
+  const hdr = snap.compose ? {} : await readThreadHeaders(emlBytes);
   const me = String((Office.context.mailbox.userProfile && Office.context.mailbox.userProfile.emailAddress) || "").toLowerCase();
   const fromAddr = (snap.from && snap.from.emailAddress) || "";
   const list = (a) => (a || []).map((x) => x.displayName || x.emailAddress).join(", ").slice(0, 300);
@@ -1202,10 +1240,10 @@ async function buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId, d
   (docs || []).filter((d) => isPdfDoc(d))
     .map((d) => ({ d, m: /^\d{4}-\d{2}-\d{2} - (.*?)(?: \(\d+\))?\.pdf$/i.exec(d.name || "") }))
     .filter((x) => x.m && x.m[1].trim().toLowerCase() === tail)
-    .map((x) => x.d).sort((a, b) => String(b.name).localeCompare(String(a.name))).slice(0, 4).forEach(add);
+    .map((x) => x.d).sort((a, b) => String(b.name).localeCompare(String(a.name))).slice(0, 12).forEach(add); // up to 12 same-subject PDFs, so the real conversation PDF is not lost among many
   let meta = null, old = null, entry = null;
   // every candidate is downloaded and read at the same time; the first one (in order) that this email belongs to is used
-  const reads = await Promise.all(cands.slice(0, 5).map(async (d) => {
+  const reads = await Promise.all(cands.slice(0, 8).map(async (d) => {
     try {
       const info = await api(`/documents/job/${jobId}/${d._id}/download-url`);
       const m = await T.unpackMeta(await fetchBytes(info.url), L);
@@ -1219,9 +1257,23 @@ async function buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId, d
   }
   if (!entry) entry = probe; // a new conversation
   meta = T.addEntry(meta, subject, entry);
-  if (JSON.stringify(meta).length > 9000000) throw new Error("the conversation is too long to keep in one PDF");
+  // The Worker accepts a page up to 8 MB. As a conversation grows, the pictures of the OLDEST emails are dropped from the PDF first (their original
+  // .eml files still have them); if even that is not enough, this email starts a fresh PDF for the conversation instead of failing.
+  const PAGE_LIMIT = 7400000, META_LIMIT = 7000000, GONE = '<span style="color:#888;font-size:11px">[picture not kept: this conversation PDF became too large. The original email file has it]</span>';
+  const tooBig = (m) => T.pageHtml(m, { topLink }).length > PAGE_LIMIT || JSON.stringify(m).length > META_LIMIT;
+  let dropped = 0, continued = false;
+  if (tooBig(meta)) {
+    for (const e of meta.entries.filter((x) => x.id !== entry.id).sort((x, y) => String(x.at).localeCompare(String(y.at)))) {
+      if (!/<img\b[^>]*\bsrc\s*=\s*["']?data:/i.test(e.html || "")) continue;
+      e.html = e.html.replace(/<img\b[^>]*\bsrc\s*=\s*["']?data:[^>]*>/gi, GONE); dropped++;
+      if (!tooBig(meta)) break;
+    }
+    if (tooBig(meta)) { meta = T.addEntry(null, subject, entry); old = null; continued = true; } // start a new PDF; it keeps the conversation going
+    if (tooBig(meta)) throw new Error("the email is too large to keep in a conversation PDF");
+    diag("save", continued ? "conversation PDF was full: this email starts a new PDF for the conversation" : `conversation PDF was getting too large: pictures of ${dropped} older email(s) were left out of it`);
+  }
   const page = T.pageHtml(meta, { topLink });
-  return { bytes: await T.packMeta(await renderPdf(page), meta, L), old, count: meta.entries.length, keys: meta.entries.flatMap(T.threadKeys) };
+  return { bytes: await T.packMeta(await renderPdf(page), meta, L), old, count: meta.entries.length, keys: meta.entries.flatMap(T.threadKeys), continued };
 }
 
 async function renderPdf(html) {
@@ -1469,6 +1521,55 @@ function getAttachment(a) {
   });
 }
 
+
+/* ---------- keeping browser storage small ---------- */
+// Old folder lists, saved-email indexes and saved marks were never removed, so a PC with many jobs slowly filled its 5 MB, after which saving
+// marks and the job list silently stopped updating. Entries past their own life span (the readers ignore them anyway) are removed, and if the
+// big ones (folder lists, saved-email indexes) still pass 3 MB, the oldest go first. Runs a few seconds after the panel opens.
+function pruneStorage() {
+  const now = Date.now(), jsonAt = (k) => { try { const r = JSON.parse(store.get(k) || "null"); return r && typeof r === "object" ? Number(r.at) || 0 : -1; } catch { return -1; } };
+  let removed = 0;
+  const rules = [[ "wb_ftree_", TREE_MAX_AGE ], [ EML_PREFIX, 30 * 864e5 ], [ SAVED_PREFIX, CONV_MAX_AGE ], [ CONV_PREFIX, CONV_MAX_AGE ], [ CPDF_PREFIX, 180 * 864e5 ]];
+  for (const k of store.keys()) {
+    for (const [p, age] of rules) {
+      if (!k.startsWith(p)) continue;
+      const at = jsonAt(k);
+      if (at > 0 && now - at > age) { store.remove(k); removed++; }
+      break;
+    }
+  }
+  const big = store.keys().filter((k) => k.startsWith("wb_ftree_") || k.startsWith(EML_PREFIX)).map((k) => ({ k, size: (store.get(k) || "").length, at: jsonAt(k) }));
+  let total = big.reduce((n, x) => n + x.size, 0);
+  if (total > 3000000) { // characters are about 2 bytes each in browser storage
+    for (const x of big.sort((a, b) => a.at - b.at)) { if (total <= 3000000) break; store.remove(x.k); total -= x.size; removed++; }
+  }
+  if (removed) diag("storage", `tidied browser storage: ${removed} old saved item(s) removed`);
+}
+setTimeout(() => { try { pruneStorage(); } catch { /* tidying must never get in the way */ } }, 5000);
+
+/* ---------- stray files ---------- */
+// A file the add-in has to take back (a half-finished save) is deleted at once. If Wunderbuild refuses (an outage, a run of 429s) the file's id is
+// remembered on this computer and it is deleted at the start of the next save for that job, so nothing is left behind unnoticed.
+const ORPHAN_PREFIX = "wb_orphan_";
+async function removeOrJot(jobId, docId) {
+  try { await api(`/documents/job/${jobId}/${docId}`, { method: "DELETE" }); return true; }
+  catch (e) {
+    if (/returned (404|400)\b/.test(String(e && e.message))) return true; // already gone
+    store.set(ORPHAN_PREFIX + jobId + "_" + docId, String(Date.now()));
+    diag("save", `a stray file could not be removed now (${e && e.message}); it will be removed at the next save`);
+    return false;
+  }
+}
+async function sweepOrphans(jobId) {
+  const prefix = ORPHAN_PREFIX + jobId + "_";
+  for (const k of Object.keys(localStorage)) {
+    if (!k.startsWith(prefix)) continue;
+    if (Date.now() - (Number(localStorage.getItem(k)) || 0) > 14 * 864e5) { store.remove(k); continue; }
+    try { await api(`/documents/job/${jobId}/${k.slice(prefix.length)}`, { method: "DELETE" }); store.remove(k); diag("save", "a stray file left by an earlier save was removed"); }
+    catch (e) { if (/returned (404|400)\b/.test(String(e && e.message))) store.remove(k); }
+  }
+}
+
 /* ---------- upload ---------- */
 async function uploadFile(name, type, bytes, folderId, jobId = job._id) {
   let docId = null;
@@ -1496,7 +1597,7 @@ async function uploadFile(name, type, bytes, folderId, jobId = job._id) {
     if (!put.ok) throw upVia === "Worker" ? await proxyFileError(put, `Saving ${name}`, (st) => `Upload of ${name} failed (${st}).`) : new Error(`Upload of ${name} failed (${put.status}).`);
     return doc;
   } catch (e) {
-    if (docId) { try { await api(`/documents/job/${jobId}/${docId}`, { method: "DELETE" }); } catch { /* best effort */ } }
+    if (docId) await removeOrJot(jobId, docId);
     throw e;
   }
 }
@@ -1614,6 +1715,8 @@ function markSaved(snap) { // lets the send-time prompt know this draft has been
 $("folder").addEventListener("change", () => { if (job && !sending) checkDuplicate(); });
 for (const id of ["folder", "attFolder"]) { $(id).addEventListener("mousedown", () => refreshFolders("folder box opened")); $(id).addEventListener("focus", () => refreshFolders("folder box opened")); }
 
+// Which email Outlook has open right now (received emails only). Used to stop a save that started on one email from reading another.
+const openItemKey = () => { try { const it = Office.context.mailbox.item; return it ? String(it.itemId || "") : ""; } catch { return ""; } };
 let lastResult = null; // the outcome of the latest save
 $("send").addEventListener("click", async () => {
   if (sending) return;
@@ -1622,13 +1725,14 @@ $("send").addEventListener("click", async () => {
   const saveStart = Date.now();
   diag("save", `started (${isCompose() ? "email being written" : "received email"})`);
   let convLock = null; // held while a conversation PDF is being replaced
+  let emailLock = null; // held while this one email is being saved
   try {
     const baseName = cleanName($("name").value).trim().replace(/\.(eml|pdf|msg)$/i, "");
     if (corrMissing && job) { setStatus("Creating Correspondence folder…", "busy"); await createCorrespondence(job); }
     const folderId = $("folder").value, folderLabel = $("folder").selectedOptions[0].text;
     const attFolderId = $("attFolder").value, attFolderLabel = $("attFolder").selectedOptions[0].text;
     const atts = selectedAttachments();
-    const problems = [];
+    const problems = [], notes = []; // problems stop a draft from being sent; notes are only shown
 
     // Read everything from the open email first, in one go, so clicking another email cannot mix things up.
     setStatus(isCompose() ? "Reading your draft…" : "Reading email…", "busy");
@@ -1641,13 +1745,21 @@ $("send").addEventListener("click", async () => {
     const readAtt = (a) => { if (!memo.has(a.id)) memo.set(a.id, getAttachment(a).then((f) => ({ f }), (e) => ({ e }))); return memo.get(a.id); };
     const perFile = $("attMode").checked; // a folder chosen for each attachment, or one folder for all
     const reads = atts.map(({ att, typed, cb, folder }) => readAtt(att).then((r) => ({ att, typed, cb, folder, f: r.f, e: r.e })));
-    const htmlNow = (useFmt || snap.compose) ? await getBodyHtml() : "";
+    const itemAtStart = snap.compose ? "" : openItemKey();
+    // Every read from Outlook is started right now, in the same moment, so there is no gap in which another click could swap the email.
+    const textP = getBodyText(), emlP = snap.compose ? null : getEml().catch(() => null), htmlP = (useFmt || snap.compose) ? getBodyHtml() : Promise.resolve("");
+    textP.catch(() => {}); if (emlP) emlP.catch(() => {});
+    const htmlNow = await htmlP;
     const cidNames = new Set([...htmlNow.matchAll(/cid:([^"'\s)>]+)/gi)].map((m) => m[1].toLowerCase().split("@")[0]));
     // pictures can be listed by Outlook as ordinary attachments while the email shows them inline (common in replies)
     const customIds = new Set([...htmlNow.matchAll(/data-custom\s*=\s*["']([^"']+)["']/gi)].map((m) => { try { return decodeURIComponent(m[1]); } catch { return m[1]; } })); // Outlook on the web names a picture's attachment here
     const inlineAtts = snap.attachments.filter((a) => attType(a).startsWith("image/") && (a.size || 0) < 30 * 1024 * 1024 && (a.isInline || cidNames.has((a.name || "").toLowerCase()) || customIds.has(a.id)));
     const inlineReads = useFmt ? inlineAtts.map((a) => readAtt(a).then(async (r) => (r.f ? { a, f: await shrinkImage(r.f) } : null))) : [];
-    const [bodyText, bodyHtml, emlB64, ...rest] = await Promise.all([getBodyText(), htmlNow, snap.compose ? null : getEml().catch(() => null), ...reads, ...inlineReads]);
+    const [bodyText, bodyHtml, emlB64, ...rest] = await Promise.all([textP, htmlNow, emlP, ...reads, ...inlineReads]);
+    if (itemAtStart && openItemKey() !== itemAtStart) { // another email was clicked while this one was being read: nothing read can be trusted
+      diag("save", "stopped: another email was selected while the open email was being read");
+      throw new Error("You selected a different email while this one was being read, so nothing was saved. Select the email again and press Save.");
+    }
     const got = rest.slice(0, reads.length), inl = rest.slice(reads.length);
     if (useFmt) diag("save", `pictures in the email: ${cidNames.size + customIds.size ? `${Math.max(cidNames.size, customIds.size)} linked to attachments` : "none linked"}; ${snap.attachments.length} attachment(s) listed, ${inlineAtts.length} used as pictures, ${inl.filter(Boolean).length} read`);
     let eml;
@@ -1676,7 +1788,11 @@ $("send").addEventListener("click", async () => {
       ? (async () => renderPdf(buildEmailHtml({ subject, meta, bodyHtml, cid: buildCidMap(bodyHtml, inl, (m) => diag("pictures", m), exactPics) })))()
       : Promise.resolve(null);
     renderP.catch(() => {}); // a failure is reported where the result is used
+    sweepOrphans(jobAtSend._id).catch(() => {}); // takes back strays left by an earlier failed save (does not hold this save up)
     let existing = [];
+    if (!snap.compose && id) { // two people saving the same email at the same moment: the second waits, then finds the first copy and saves nothing twice
+      emailLock = await acquireConvLock(`${jobAtSend._id}:email:${id}`, "this email");
+    }
     if (!snap.compose || snap.savedBefore) { // a brand new email has no earlier copy, so the check is skipped
       try { setStatus("Checking for an existing copy…", "busy"); existing = await findExisting(jobAtSend, folderId, id); }
       catch (e) { problems.push(`could not check for an existing copy (${e.message})`); }
@@ -1691,9 +1807,13 @@ $("send").addEventListener("click", async () => {
     if (replace && snap.props) { try { const v = String(snap.props.get("wbPdf") || ""); const [j, d] = v.split(":"); if (j === jobAtSend._id && d) priorPdf = d; } catch { /* none */ } }
     let nameDocs = existing.all;
     if (needPdf && !nameDocs) { try { nameDocs = await listDocs(jobAtSend._id, folderId); } catch { nameDocs = []; } }
-    const taken = new Set((nameDocs || []).filter((d) => d._id !== priorPdf).map((d) => String(d.name || "").toLowerCase()));
-    let pdfName = `${baseName}.pdf`;
-    for (let n = 2; taken.has(pdfName.toLowerCase()) && n < 100; n++) pdfName = `${baseName} (${n}).pdf`;
+    const uniquePdfName = (docs) => {
+      const used = new Set((docs || []).filter((d) => d._id !== priorPdf).map((d) => String(d.name || "").toLowerCase()));
+      let nm = `${baseName}.pdf`;
+      for (let n = 2; used.has(nm.toLowerCase()) && n < 100; n++) nm = `${baseName} (${n}).pdf`;
+      return nm;
+    };
+    let pdfName = uniquePdfName(nameDocs);
 
     let pdf = null, convOld = null, convUsed = false, convKeys = [];
     const emlName = `${fileBase}.eml`;
@@ -1708,9 +1828,13 @@ $("send").addEventListener("click", async () => {
     };
     if (convOn && needPdf) {
       convLock = await acquireConvLock(`${jobAtSend._id}:${hash40(window.WBThread ? window.WBThread.subjectKey(subject) : String(subject))}`); // throws if someone else is updating it
+      if (convLock) { // someone may have replaced the conversation PDF while this save was waiting: look at the folder again, now that nobody else can change it
+        try { setStatus("Checking the folder again…", "busy"); nameDocs = await listDocs(jobAtSend._id, folderId); pdfName = uniquePdfName(nameDocs); }
+        catch (e) { diag("save", `folder not re-read after the lock: ${e.message}`); }
+      }
       try {
         setStatus("Adding this email to its conversation PDF…", "busy");
-        const r = await buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId: jobAtSend._id, docs: nameDocs, outlookFolderId, emlName, topLink: wbLink(jobAtSend._id, folderId), exactPics });
+        const r = await buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId: jobAtSend._id, docs: nameDocs, outlookFolderId, emlName, topLink: wbLink(jobAtSend._id, folderId), exactPics, emlBytes: snap.compose ? null : eml });
         pdf = r.bytes; convOld = r.old; convUsed = true; convKeys = r.keys;
         if (r.old) pdfName = r.old.name; // the conversation PDF keeps its name
         diag("save", `conversation PDF: ${r.count} message(s)${r.old ? ", replacing the earlier one" : ", new"}`);
@@ -1721,7 +1845,7 @@ $("send").addEventListener("click", async () => {
         setStatus("Rendering formatted PDF…", "busy");
         pdf = await renderP;
         if (!pdf) pdf = await renderPdf(buildEmailHtml({ subject, meta, bodyHtml, cid: buildCidMap(bodyHtml, inl, (m) => diag("pictures", m), exactPics) }));
-      } catch (e) { problems.push(`formatted PDF unavailable (${e.message}), so a basic text PDF was saved instead`); }
+      } catch (e) { notes.push(`the formatted PDF was not available (${e.message}), so a basic text PDF was saved instead`); } // a note, not a problem: it must not stop a draft from being sent
     }
     let newPdfOk = false, newEmlOk = false, emlDoc = null, pdfDoc = null;
     // The PDF and the original email are saved together; a failed PDF stops everything, a failed original email is only reported.
@@ -1740,12 +1864,12 @@ $("send").addEventListener("click", async () => {
     if (needPdf || needEml) setStatus(`Saving ${needPdf && needEml ? "PDF and original email" : needPdf ? "PDF" : "original email"}…`, "busy");
     const [pdfDone] = await Promise.allSettled([pdfJob, emlJob]);
     if (pdfDone.status === "rejected") { // nothing half-saved: take back the original email that was saved alongside
-      if (emlDoc) { try { await api(`/documents/job/${jobAtSend._id}/${emlDoc._id}`, { method: "DELETE" }); } catch { /* best effort */ } }
+      if (emlDoc) await removeOrJot(jobAtSend._id, emlDoc._id);
       throw pdfDone.reason;
     }
     if (newPdfOk && needEml && !newEmlOk) { // the PDF has no reference of its own, so without the .eml a retry would save it twice: take it back
-      if (pdfDoc) { try { await api(`/documents/job/${jobAtSend._id}/${pdfDoc._id}`, { method: "DELETE" }); } catch { /* best effort */ } }
-      throw new Error(`Nothing was saved because the original email could not be filed (${problems[problems.length - 1] || "unknown problem"}). Please try again.`);
+      const removed = pdfDoc ? await removeOrJot(jobAtSend._id, pdfDoc._id) : true;
+      throw new Error(`Nothing was saved because the original email could not be filed (${problems[problems.length - 1] || "unknown problem"}).${removed ? "" : " A stray PDF could not be taken back just now; it will be removed automatically the next time you save to this job."} Please try again.`);
     }
     if (convUsed && newPdfOk && pdfDoc) rememberConvPdf(convKeys, jobAtSend._id, pdfDoc._id);
     if (convOld && newPdfOk && (!needEml || newEmlOk)) { // the updated conversation PDF is in, so the earlier version of it goes
@@ -1802,6 +1926,7 @@ $("send").addEventListener("click", async () => {
       } else msg = `The PDF was already saved.${newEmlOk ? ` Added the missing original email in ${folderLabel} / Outlook Files.` : ""}`;
     }
     if (atts.length) msg += ` ${savedAtts} of ${atts.length} attachment${atts.length === 1 ? "" : "s"} in ${perFile ? "the chosen folders" : attFolderLabel}.`;
+    if (notes.length) msg += ` Note: ${notes.join("; ")}.`;
     if (problems.length) msg += ` Problems: ${problems.join("; ")}.`;
     if (!snap.compose && !problems.length) { dupFound = true; if (!savedAt) savedAt = new Date(); } // everything saved: the button turns into the green "Sent to Wunderbuild"
     const wantSend = snap.compose; // a draft is always sent as it is saved, so the saved copy matches what went out
@@ -1823,7 +1948,7 @@ $("send").addEventListener("click", async () => {
     lastResult = { msg: e.message, kind: "err", subject: "" };
     setStatus(e.message, "err");
   } finally {
-    releaseConvLock(convLock);
+    releaseConvLock(convLock); releaseConvLock(emailLock);
     sending = false; lockUI(false); refreshSend();
     if (pendingRefresh) { // another email was selected during the save: refresh, then bring the result back (it would otherwise be wiped)
       pendingRefresh = false;
@@ -2021,21 +2146,23 @@ async function buildReport() {
     const four = await Promise.all([1, 2, 3, 4].map(() => one(`${root}/ping?t=${stamp()}`)));
     add(`   4 at the same time: ${four.join(" | ")} (all done in ${Math.round(performance.now() - par)} ms)`);
     if (key) {
-      const timed = async (url) => { const t0 = performance.now(); try { const r = await fetch(url, { headers: { "x-api-key": key, "Content-Type": "application/json" }, signal: AbortSignal.timeout(30000) }); await r.text(); return r.ok ? Math.round(performance.now() - t0) : null; } catch { return null; } };
+      let hit429 = false; // the 429 rule: when Wunderbuild says "too many requests", this test stops and background work pauses for a minute
+      const timed = async (url) => { const t0 = performance.now(); try { const r = await fetch(url, { headers: { "x-api-key": key, "Content-Type": "application/json" }, signal: AbortSignal.timeout(30000) }); await r.text(); if (r.status === 429) { hit429 = true; apiLowPause = Math.max(apiLowPause, Date.now() + 60000); } return r.ok ? Math.round(performance.now() - t0) : null; } catch { return null; } };
       const stats = (label, arr, fails) => {
         const v = arr.filter((x) => x !== null).sort((x, y) => x - y);
         if (!v.length) return add(`   ${label}: no successful answers (${fails} failed)`);
         add(`   ${label}: fastest ${v[0]} ms | middle ${v[Math.floor(v.length / 2)]} ms | average ${Math.round(v.reduce((x, y) => x + y, 0) / v.length)} ms | slowest ${v[v.length - 1]} ms | ${v.length} answered${fails ? `, ${fails} failed` : ""}`);
       };
       add("B. Through the Worker to Wunderbuild, with the key (8 calls one after another each):");
-      const jt = []; for (let i = 0; i < 8; i++) { diagStep = `Speed test: job list call ${i + 1} of 8 (each can take up to 30 s)`; jt.push(await timed(`${base()}/jobs?page=1&limit=1`)); }
+      const jt = []; for (let i = 0; i < 8 && !hit429; i++) { diagStep = `Speed test: job list call ${i + 1} of 8 (each can take up to 30 s)`; jt.push(await timed(`${base()}/jobs?page=1&limit=1`)); }
       stats("Job list", jt, jt.filter((x) => x === null).length);
       add(`   each: ${jt.map((x) => (x === null ? "failed" : x + " ms")).join(", ")}`);
       if (job) {
-        const ft = []; for (let i = 0; i < 8; i++) { diagStep = `Speed test: folder call ${i + 1} of 8 (each can take up to 30 s)`; ft.push(await timed(`${base()}/documents/job/${job._id}/folders`)); }
+        const ft = []; for (let i = 0; i < 8 && !hit429; i++) { diagStep = `Speed test: folder call ${i + 1} of 8 (each can take up to 30 s)`; ft.push(await timed(`${base()}/documents/job/${job._id}/folders`)); }
         stats("Folders of the chosen job", ft, ft.filter((x) => x === null).length);
         add(`   each: ${ft.map((x) => (x === null ? "failed" : x + " ms")).join(", ")}`);
       }
+      if (hit429) add("   Stopped early: Wunderbuild answered 429 (too many requests). Under the 429 rule the test stops, and background work pauses for a minute.");
     }
     try {
       const es = performance.getEntriesByType("resource").filter((e) => e.name.indexOf("/ping") > -1);

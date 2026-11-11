@@ -64,5 +64,13 @@
     try { walk(toLatin1(bytes), 0, byCid); } catch { /* unreadable: nothing found */ }
     return { byCid, count: byCid.size };
   }
-  root.WBMime = { pictures };
+  // The conversation links of an exported email: Message-ID, In-Reply-To and References, as written in its top headers.
+  // WBMime.headers(bytes) -> { msgId, inReplyTo, references } (empty text when a header is missing). Reads only the start of the file.
+  function headers(bytes) {
+    try {
+      const { headers } = splitHead(toLatin1(bytes.subarray(0, Math.min(bytes.length, 262144))));
+      return { msgId: headers.get("message-id") || "", inReplyTo: headers.get("in-reply-to") || "", references: headers.get("references") || "" };
+    } catch { return { msgId: "", inReplyTo: "", references: "" }; }
+  }
+  root.WBMime = { pictures, headers };
 })(typeof window !== "undefined" ? window : globalThis);
