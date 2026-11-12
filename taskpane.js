@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.104"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.105"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -1245,7 +1245,7 @@ async function buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId, d
   const cands = [], seen = new Set();
   const add = (d) => { if (d && d._id && !seen.has(d._id) && !d.isDeleted) { seen.add(d._id); cands.push(d); } };
   const probe = mkEntry(T.trim(bodyHtml, null));
-  const remembered = [...new Set(T.threadKeys(probe).map((k) => { try { const r = JSON.parse(store.get(CPDF_PREFIX + hash40(k)) || "null"); return r && r.j === jobId && r.d ? r.d : ""; } catch { return ""; } }).filter(Boolean))];
+  const remembered = [...new Set([...T.threadKeys(probe), ...(probe.convId ? ["conv:" + probe.convId] : [])].map((k) => { try { const r = JSON.parse(store.get(CPDF_PREFIX + hash40(k)) || "null"); return r && r.j === jobId && r.d ? r.d : ""; } catch { return ""; } }).filter(Boolean))];
   (await Promise.all(remembered.map((d) => api(`/documents/job/${jobId}/${d}`).catch((e) => { // gone or not readable: ignored, and forgotten so it is not asked about again
     if (/returned (400|404)\b/.test(String(e && e.message))) for (const k of Object.keys(localStorage)) { if (k.startsWith(CPDF_PREFIX)) { try { if (JSON.parse(localStorage.getItem(k)).d === d) localStorage.removeItem(k); } catch { /* ignore */ } } }
     return null;
@@ -1255,6 +1255,13 @@ async function buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId, d
     .map((d) => ({ d, m: /^\d{4}-\d{2}-\d{2} - (.*?)(?: \(\d+\))?\.pdf$/i.exec(d.name || "") }))
     .filter((x) => x.m && x.m[1].trim().toLowerCase() === tail)
     .map((x) => x.d).sort((a, b) => String(b.name).localeCompare(String(a.name))).slice(0, 12).forEach(add); // up to 12 same-subject PDFs, so the real conversation PDF is not lost among many
+  if (!cands.length) { // a new subject (or a changed one) with nothing remembered: the newest recent PDFs of this folder are also looked at; the email joins one only if its messages really belong to it
+    const cutoff = Date.now() - 30 * 86400000;
+    (docs || []).filter((d) => isPdfDoc(d) && !d.isDeleted).map((d) => ({ d, m: /^(\d{4}-\d{2}-\d{2}) - /.exec(d.name || "") }))
+      .filter((x) => x.m && new Date(x.m[1]).getTime() >= cutoff)
+      .sort((p, q) => String(q.d.name).localeCompare(String(p.d.name))).slice(0, 3).forEach((x) => add(x.d));
+    if (cands.length) diag("save", `no PDF for this subject: ${cands.length} recent PDF(s) checked in case the subject was changed`);
+  }
   let meta = null, old = null, entry = null;
   // every candidate is downloaded and read at the same time; the first one (in order) that this email belongs to is used
   const reads = await Promise.all(cands.slice(0, 8).map(async (d) => {
@@ -1287,7 +1294,7 @@ async function buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId, d
     diag("save", continued ? "conversation PDF was full: this email starts a new PDF for the conversation" : `conversation PDF was getting too large: pictures of ${dropped} older email(s) were left out of it`);
   }
   const page = T.pageHtml(meta, { topLink });
-  return { bytes: await T.packMeta(await renderPdf(page), meta, L), old, count: meta.entries.length, keys: meta.entries.flatMap(T.threadKeys), continued };
+  return { bytes: await T.packMeta(await renderPdf(page), meta, L), old, count: meta.entries.length, keys: [...meta.entries.flatMap(T.threadKeys), ...meta.entries.map((x) => x.convId ? "conv:" + x.convId : "").filter(Boolean)], continued };
 }
 
 async function renderPdf(html) {
