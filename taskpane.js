@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.102"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.103"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -43,6 +43,7 @@ const isPdfDoc = (d) => /\.pdf$/i.test((d && d.name) || ""), isEmlDoc = (d) => /
 let repliedOnly = false; // filed because a reply to it was saved
 let foldersFailed = false, foldersPending = false; // the job's folder list could not be loaded
 let savedBy = ""; // who filed it, when Wunderbuild says (or this PC remembers saving it itself)
+let resaveNext = false; // set by "Resave Email": the next save replaces the copy already in Wunderbuild
 let dupFound = false, savedAt = null, attOpen = false; // savedAt: when the email was filed; attOpen: "Save Attachments Only" pressed
 function docSavedBy(d) { // Wunderbuild may name the creator under a few different fields; a name is shown only if one is there
   for (const k of ["createdBy", "uploadedBy", "creator", "user", "owner", "author"]) {
@@ -79,6 +80,7 @@ function refreshSend() {
   $("main").className = filed ? (attOpen ? "filed attopen" : "filed") : "";
   $("savedNote").textContent = filed ? (savedAt ? `${repliedOnly ? "Reply saved" : "Saved"} to Wunderbuild on ${fmtSaved(savedAt)}${savedBy ? ` by ${savedBy}` : ""}` : "Already saved to Wunderbuild") : "";
   $("attOnlyBtn").hidden = !(filed && !attOpen && currentAtts.length > 0);
+  $("resaveBtn").hidden = !(filed && !!job); $("resaveBtn").disabled = sending;
 }
 
 // Wunderbuild limits how fast requests can be made, so at most 4 run at once, and a "429 Too Many Requests" reply
@@ -1735,6 +1737,7 @@ let lastResult = null; // the outcome of the latest save
 $("send").addEventListener("click", async () => {
   if (sending) return;
   lastResult = null;
+  const forceResave = resaveNext; resaveNext = false; // true only when started by "Resave Email"
   sending = true; lockUI(true); $("send").disabled = true;
   const saveStart = Date.now();
   diag("save", `started (${isCompose() ? "email being written" : "received email"})`);
@@ -1798,7 +1801,7 @@ $("send").addEventListener("click", async () => {
       try { await (convOn ? loadConvTools() : loadThreadTool()); }
       catch (e) { diag("save", `tools not loaded: ${e.message}`); convOn = false; }
     }
-    const renderP = useFmt && !convOn && (snap.compose || !dupFound)
+    const renderP = useFmt && !convOn && (snap.compose || forceResave || !dupFound)
       ? (async () => renderPdf(buildEmailHtml({ subject, meta, bodyHtml, cid: buildCidMap(bodyHtml, inl, (m) => diag("pictures", m), exactPics) })))()
       : Promise.resolve(null);
     renderP.catch(() => {}); // a failure is reported where the result is used
@@ -1812,7 +1815,7 @@ $("send").addEventListener("click", async () => {
       catch (e) { problems.push(`could not check for an existing copy (${e.message})`); }
     }
     const oldPdf = existing.filter(isPdfDoc), oldEml = existing.filter(isEmlDoc);
-    const replace = snap.compose; // a draft is saved afresh each time, so the saved copy always matches what is sent
+    const replace = snap.compose || forceResave; // a draft is saved afresh each time, so the saved copy always matches what is sent
     const needPdf = replace || !(oldPdf.length || oldEml.length), needEml = replace || !oldEml.length; // the PDF has a clean name, so a saved .eml means its PDF is saved too; // a received email only fills in what is missing
     const duplicate = !needPdf && !needEml;
     const fileBase = `${baseName} [${id}]`; // only the .eml (in "Outlook Files") carries the reference; the PDF keeps a clean name
@@ -2294,6 +2297,10 @@ $("attMode").addEventListener("change", () => {
     const sel = row.children[3];
     if (sel && !sel.dataset.touched) sel.value = $("attFolder").value;
   }
+});
+$("resaveBtn").addEventListener("click", () => {
+  if (sending || !job) return;
+  resaveNext = true; $("send").disabled = false; $("send").click(); // the same save, but it replaces the saved copy
 });
 $("attOnlyBtn").addEventListener("click", () => {
   attOpen = true;

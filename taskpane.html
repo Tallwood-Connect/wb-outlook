@@ -6,7 +6,7 @@
 <meta http-equiv="Content-Security-Policy" content="object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>Send to Wunderbuild</title>
 <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
-<script src="channel.js?v=1.102"></script>
+<script src="channel.js?v=1.103"></script>
 <style>
   :root{--ink:#0f2438;--muted:#5a6b7a;--line:#d3dce4;--bg:#fff;--soft:#f1f5f8;--brand:#2b976f;--accent:#1d7a57;--bad:#a4262c;--ok:#1d7a57;--navy:#0f2438}
   @media (prefers-color-scheme:dark){:root{--ink:#e6edf3;--muted:#98a9b8;--line:#2a3f54;--bg:#0b1a28;--soft:#12283b;--brand:#2b976f;--accent:#4fc59a;--bad:#f1707b;--ok:#4fc59a;--navy:#08141f}}
@@ -27,18 +27,19 @@
   #jobs li:last-child button{border-bottom:0}
   #jobs button:hover,#jobs button[aria-pressed=true]{background:var(--soft)}
   #jobs small{display:block;color:var(--muted)}
-  #chosen{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;margin-top:0;padding:9px 12px;border:0;border-radius:4px;background:var(--brand);color:#fff;font:600 14px "Segoe UI",system-ui,sans-serif;text-align:left;cursor:pointer}
+  #chosen{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;margin-top:0;padding:11px 12px 8px;border:0;border-radius:4px;background:var(--brand);color:#fff;font:600 14px "Segoe UI",system-ui,sans-serif;text-align:left;cursor:pointer}
   #chosen[hidden]{display:none}
   #chosen #chosenText{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   #chosen .x{flex:none;display:block;margin:0 2px}
   #chosen:disabled{opacity:.5;cursor:default}
   #main.filed:not(.attopen) #chosen{pointer-events:none}#main.filed:not(.attopen) #chosen .x{display:none}
+  #filedBtns{display:flex;gap:8px}
   #convFound.chip{display:inline-block;cursor:default;margin-top:6px}
   #convFound[hidden]{display:none}
   #send{width:100%;margin-top:16px;padding:9px;border:0;border-radius:4px;background:var(--brand);color:#fff;font:600 14px "Segoe UI",system-ui,sans-serif;cursor:pointer}
   #send:disabled{opacity:.5;cursor:default}
   #savedNote{margin-top:6px;color:var(--muted);font-size:12px;text-align:center} #savedNote:empty{display:none}
-  #attOnlyBtn{width:100%;margin-top:10px;text-align:center}
+  #attOnlyBtn,#resaveBtn{flex:1 1 0;min-width:0;margin-top:10px;text-align:center}
   /* an email that is already filed shows only the tick button until "Save Attachments Only" is pressed */
   #main.filed #nameBlock,#main.filed #corrNote,#main.filed:not(.attopen) #attSection,
   #main.filed:not(.attopen) label[for="q"],#main.filed:not(.attopen) #q,#main.filed:not(.attopen) #jobs,#main.filed:not(.attopen) #matchNote,#main.filed:not(.attopen) #autoNote{display:none!important}
@@ -127,7 +128,7 @@
 })();
 </script>
 
-<h1>Send to Wunderbuild <span id="ver" data-v="1.102"></span></h1>
+<h1>Send to Wunderbuild <span id="ver" data-v="1.103"></span></h1>
 
 <details id="settings">
   <summary>API Settings</summary>
@@ -217,7 +218,7 @@
 <button id="send" disabled>Send to Wunderbuild</button>
 <button type="button" class="sec" id="refreshDraft" hidden>Reset</button>
 <div id="savedNote" role="status"></div>
-<button type="button" class="sec" id="attOnlyBtn" hidden>Save Attachments Only</button>
+<div id="filedBtns"><button type="button" class="sec" id="attOnlyBtn" hidden>Save Attachments Only</button><button type="button" class="sec" id="resaveBtn" hidden>Resave Email</button></div>
 <div id="status" role="status" aria-live="polite"></div>
 </div>
 
@@ -244,8 +245,8 @@
   <button type="button" class="sec" id="brGo" disabled>Attach Selected</button>
 </div>
 
-<script src="pdf.js?v=1.102"></script>
-<script src="eml.js?v=1.102"></script>
-<script src="taskpane.js?v=1.102"></script>
+<script src="pdf.js?v=1.103"></script>
+<script src="eml.js?v=1.103"></script>
+<script src="taskpane.js?v=1.103"></script>
 </body>
 </html>
