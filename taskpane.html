@@ -6,7 +6,7 @@
 <meta http-equiv="Content-Security-Policy" content="object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>Send to Wunderbuild</title>
 <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
-<script src="channel.js?v=1.100"></script>
+<script src="channel.js?v=1.101"></script>
 <style>
   :root{--ink:#0f2438;--muted:#5a6b7a;--line:#d3dce4;--bg:#fff;--soft:#f1f5f8;--brand:#2b976f;--accent:#1d7a57;--bad:#a4262c;--ok:#1d7a57;--navy:#0f2438}
   @media (prefers-color-scheme:dark){:root{--ink:#e6edf3;--muted:#98a9b8;--line:#2a3f54;--bg:#0b1a28;--soft:#12283b;--brand:#2b976f;--accent:#4fc59a;--bad:#f1707b;--ok:#4fc59a;--navy:#08141f}}
@@ -27,7 +27,14 @@
   #jobs li:last-child button{border-bottom:0}
   #jobs button:hover,#jobs button[aria-pressed=true]{background:var(--soft)}
   #jobs small{display:block;color:var(--muted)}
-  #chosen{margin-top:6px;color:var(--accent);font-weight:600}
+  #chosen{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;margin-top:0;padding:9px 12px;border:0;border-radius:4px;background:var(--brand);color:#fff;font:600 14px "Segoe UI",system-ui,sans-serif;text-align:left;cursor:pointer}
+  #chosen[hidden]{display:none}
+  #chosen #chosenText{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #chosen .x{flex:none;font-size:20px;line-height:1;padding:0 2px}
+  #chosen:disabled{opacity:.5;cursor:default}
+  #main.filed:not(.attopen) #chosen{pointer-events:none}#main.filed:not(.attopen) #chosen .x{display:none}
+  #convFound.chip{display:inline-block;cursor:default;margin-top:6px}
+  #convFound[hidden]{display:none}
   #send{width:100%;margin-top:16px;padding:9px;border:0;border-radius:4px;background:var(--brand);color:#fff;font:600 14px "Segoe UI",system-ui,sans-serif;cursor:pointer}
   #send:disabled{opacity:.5;cursor:default}
   #savedNote{margin-top:6px;color:var(--muted);font-size:12px;text-align:center} #savedNote:empty{display:none}
@@ -120,20 +127,20 @@
 })();
 </script>
 
-<h1>Send to Wunderbuild <span id="ver" data-v="1.100"></span></h1>
+<h1>Send to Wunderbuild <span id="ver" data-v="1.101"></span></h1>
 
 <details id="settings">
-  <summary>API settings</summary>
-  <label for="key">API key (or proxy access token)</label>
+  <summary>API Settings</summary>
+  <label for="key">API Key (or Proxy Access Token)</label>
   <input id="key" type="password" autocomplete="off" placeholder="Paste your key or access token">
-  <label for="base">API base URL (proxy address ending /api)</label>
+  <label for="base">API Base URL (Proxy Address Ending /api)</label>
   <input id="base" type="url" value="https://api.wunderbuild.com/api">
-  <label class="chk"><input type="checkbox" id="fmtPdf" checked> Formatted PDF (rendered by the Cloudflare Worker)</label>
-  <label class="chk"><input type="checkbox" id="convPdf" checked> One PDF per email conversation (beta): later emails in the same conversation are added to the same PDF</label>
+  <label class="chk"><input type="checkbox" id="fmtPdf" checked> Formatted PDF (Rendered by the Cloudflare Worker)</label>
+  <label class="chk"><input type="checkbox" id="convPdf" checked> One PDF per Email Conversation (Beta): later emails in the same conversation are added to the same PDF</label>
   <div class="btns">
-    <button type="button" class="sec" id="prepFolders">Load folder lists and saved emails for all jobs (set-up)</button>
-    <button type="button" class="sec" id="clearCache">Clear saved job list and history</button>
-    <button type="button" class="sec" id="signOut">Remove my key and saved data</button>
+    <button type="button" class="sec" id="prepFolders">Load Folder Lists and Saved Emails for All Jobs (Set-Up)</button>
+    <button type="button" class="sec" id="clearCache">Clear Saved Job List and History</button>
+    <button type="button" class="sec" id="signOut">Remove My Key and Saved Data</button>
   </div>
   <div id="clearNote" role="status"></div>
   <div id="prepNote" role="status" class="hint2"></div>
@@ -141,8 +148,8 @@
 
 <details id="prefs">
   <summary>Settings</summary>
-  <label class="chk"><input type="checkbox" id="askSend"> Ask me to save sent emails to Wunderbuild when I click Send</label>
-  <div class="grpHead">Automatic subject: include</div>
+  <label class="chk"><input type="checkbox" id="askSend"> Ask Me to Save Sent Emails to Wunderbuild When I Click Send</label>
+  <div class="grpHead">Automatic Subject: Include</div>
   <div class="opt"><span>Job number</span><label class="switch"><input type="checkbox" id="sjNum" role="switch" aria-label="Include the job number in the automatic subject"><span class="track"></span></label></div>
   <div class="opt"><span>Name</span><label class="switch"><input type="checkbox" id="sjName" role="switch" aria-label="Include the job name in the automatic subject"><span class="track"></span></label></div>
   <div class="opt"><span>Address</span><label class="switch"><input type="checkbox" id="sjAddr" role="switch" aria-label="Include the job address in the automatic subject"><span class="track"></span></label></div>
@@ -158,10 +165,11 @@
 
 <div id="main">
 <label for="q">Job</label>
-<input id="q" type="search" placeholder="Search by job name, number or address">
+<input id="q" type="search" name="wb-job-search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search by job name, number or address">
 <div id="matchNote" role="status"></div>
 <ul id="jobs"></ul>
-<div id="chosen"></div>
+<button type="button" id="chosen" hidden aria-label="Selected job. Press to clear it and search again"><span id="chosenText"></span><span class="x" aria-hidden="true">×</span></button>
+<div id="convFound" class="sec chip" hidden>Conversation Found</div>
 <div id="autoNote"></div>
 <div id="subjNote" role="alert"></div>
 
@@ -173,22 +181,22 @@
 
 <div id="nameBlock">
 <label for="name">File Name (Excluding Extension)</label>
-<input id="name" type="text">
+<input id="name" type="text" autocomplete="off">
 <details class="more"><summary>More Info</summary><div>A short reference ID is added to the saved file names automatically. It stops the same email being saved twice.</div></details>
 </div>
 
 <div id="wbAttach" hidden>
-  <button type="button" class="sec" id="wbAttachBtn" disabled>Attach files from Wunderbuild</button>
-  <button type="button" class="sec" id="browseBtn" disabled>Browse files…</button>
-  <button type="button" class="sec" id="wbClearBtn">Clear attachments</button>
+  <button type="button" class="sec" id="wbAttachBtn" disabled>Attach Files from Wunderbuild</button>
+  <button type="button" class="sec" id="browseBtn" disabled>Browse Files…</button>
+  <button type="button" class="sec" id="wbClearBtn">Clear Attachments</button>
   <div id="wbPick" hidden>
-    <label for="pickQ" style="margin-top:0">Search file names in this job</label>
+    <label for="pickQ" style="margin-top:0">Search File Names in This Job</label>
     <input id="pickQ" type="search" placeholder="Type part of a file name" autocomplete="off">
-    <label for="pickFolder">Or browse a folder</label>
+    <label for="pickFolder">Or Browse a Folder</label>
     <select id="pickFolder"></select>
     <div id="pickList" role="group" aria-label="Files in this folder"></div>
     <div class="btns">
-      <button type="button" class="sec" id="pickGo" disabled>Attach selected</button>
+      <button type="button" class="sec" id="pickGo" disabled>Attach Selected</button>
     </div>
     <div id="pickStatus" role="status"></div>
   </div>
@@ -197,12 +205,12 @@
 <div id="attSection" hidden>
   <div id="attHead">
     <span class="swl">Attachments</span>
-    <span class="swt on" id="swOne">One folder</span>
+    <span class="swt on" id="swOne">One Folder</span>
     <label class="switch"><input type="checkbox" id="attMode" role="switch" aria-label="Choose a folder for each attachment separately"><span class="track"></span></label>
     <span class="swt" id="swEach">Individual</span>
   </div>
   <div id="attList"></div>
-  <label for="attFolder" id="attFolderLabel">Save attachments to</label>
+  <label for="attFolder" id="attFolderLabel">Save Attachments to</label>
   <select id="attFolder" disabled><option value="">Choose a job first</option></select>
 </div>
 
@@ -216,28 +224,28 @@
 <details id="help">
   <summary>Troubleshooter</summary>
   <p class="hint">Something not working? Press the button to collect technical details (these include the open email's subject and attachment names, but never your key or the text of your emails). Then email them, or save them as a text file.</p>
-  <label class="chk" style="display:flex;gap:8px;align-items:center;font-size:12px;margin:6px 0"><input type="checkbox" id="diagSkipSpeed"> Skip the speed test (much quicker; Jason may ask you to run it)</label>
-  <button type="button" class="sec" id="diagRun">Collect information</button>
+  <label class="chk" style="display:flex;gap:8px;align-items:center;font-size:12px;margin:6px 0"><input type="checkbox" id="diagSkipSpeed"> Skip the Speed Test (much quicker; Jason may ask you to run it)</label>
+  <button type="button" class="sec" id="diagRun">Collect Information</button>
   <div id="diagNote" role="status"></div>
   <div id="diagBtns" class="btns" hidden>
     <button type="button" class="sec" id="diagEmail">Email to Jason</button>
-    <button type="button" class="sec" id="diagSave">Save as text file</button>
+    <button type="button" class="sec" id="diagSave">Save as Text File</button>
     <button type="button" class="sec" id="diagCopy">Copy</button>
   </div>
   <textarea id="diagOut" readonly rows="8" hidden aria-label="Troubleshooting report"></textarea>
 </details>
 
 <div id="browse" role="dialog" aria-modal="true" aria-label="Browse files" hidden>
-  <div id="brHead"><b>Browse files</b><button type="button" class="sec" id="brClose">Close</button></div>
+  <div id="brHead"><b>Browse Files</b><button type="button" class="sec" id="brClose">Close</button></div>
   <div id="brNav"><button type="button" class="sec" id="brBack" disabled>◂ Back</button><span id="brPath"></span></div>
   <div id="brStatus" role="status"></div>
   <div id="brFolders"></div>
   <div id="brFiles"></div>
-  <button type="button" class="sec" id="brGo" disabled>Attach selected</button>
+  <button type="button" class="sec" id="brGo" disabled>Attach Selected</button>
 </div>
 
-<script src="pdf.js?v=1.100"></script>
-<script src="eml.js?v=1.100"></script>
-<script src="taskpane.js?v=1.100"></script>
+<script src="pdf.js?v=1.101"></script>
+<script src="eml.js?v=1.101"></script>
+<script src="taskpane.js?v=1.101"></script>
 </body>
 </html>

@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.100"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.101"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -69,7 +69,7 @@ function refreshSend() {
   if (dupFound && !compose && !(attOn && ready)) { btn.textContent = "Sent to Wunderbuild"; btn.className = "done"; btn.disabled = true; }
   else {
     btn.className = "";
-    btn.textContent = dupFound && !compose ? "Save attachments" : compose ? (canSendFromAddin() ? "Save and send" : "Save to Wunderbuild") : "Send to Wunderbuild";
+    btn.textContent = dupFound && !compose ? "Save Attachments" : compose ? (canSendFromAddin() ? "Save and Send" : "Save to Wunderbuild") : "Send to Wunderbuild";
     btn.disabled = !ready || sending; // not while an attachment is being added or a save is running
   }
   $("wbAttachBtn").disabled = !job || sending; $("browseBtn").disabled = !job || sending;
@@ -230,7 +230,7 @@ async function smartFill() {
   if (rec) {
     await chooseJob(rec.j);
     if (run !== fillRun) return; // another email was selected meanwhile
-    $("autoNote").textContent = `Job filled in from an earlier email in this conversation, saved ${fmtDate(rec.at)}. Check it is correct.`;
+    $("convFound").hidden = false; $("convFound").title = `Job filled in from an earlier email in this conversation, saved ${fmtDate(rec.at)}. Check it is correct.`;
   } else {
     await autoMatch();
   }
@@ -238,6 +238,7 @@ async function smartFill() {
 
 /* ---------- job search ---------- */
 let timer;
+$("chosen").addEventListener("click", () => { if ($("chosen").disabled) return; clearJob(); $("q").focus(); });
 $("q").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(searchJobs, 300); });
 
 // The full job number as Wunderbuild shows it, e.g. J-01053
@@ -469,7 +470,7 @@ async function autoMatch() {
 function clearJob() {
   job = null; jobAuto = false; foldersFailed = false; foldersPending = false; $("subjNote").textContent = "";
   folderRun++; searchRun++;
-  $("chosen").textContent = "";
+  $("chosen").hidden = true; $("chosenText").textContent = ""; $("convFound").hidden = true; $("q").hidden = false;
   $("matchNote").className = ""; $("matchNote").textContent = "";
   $("autoNote").textContent = "";
   $("corrNote").hidden = true;
@@ -495,7 +496,7 @@ async function chooseJob(j) {
   $("autoNote").textContent = "";
   $("jobs").textContent = "";
   $("q").value = "";
-  $("chosen").textContent = `Job: ${fullJobNo(j) ? fullJobNo(j) + " " : ""}${j.name}`;
+  $("chosenText").textContent = `${fullJobNo(j) ? fullJobNo(j) + " " : ""}${j.name}`; $("chosen").hidden = false; $("q").hidden = true; $("convFound").hidden = true;
   refreshSend();
   await loadFolders();
   if (subjectPrefixOn()) await applySubjectPrefix(); // after the folders, so a problem message is not wiped by them
@@ -1407,7 +1408,7 @@ async function checkDuplicate() {
   if (mem) { // saved earlier on this computer: show it straight away, confirm quietly below
     dupFound = true; savedAt = mem.saved ? new Date(mem.saved) : null;
     for (const row of $("attList").children) row.children[0].checked = false;
-    if (isCompose()) note.textContent = "This email was already saved to Wunderbuild. Save and send will update the saved copy, then send it.";
+    if (isCompose()) note.textContent = "This email was already saved to Wunderbuild. Save and Send will update the saved copy, then send it.";
     refreshSend();
   } else if (!skipScan) { note.className = "busy"; note.textContent = "Checking whether this email is already saved…"; }
   try {
@@ -1430,7 +1431,7 @@ async function checkDuplicate() {
         diag("save", `saved file fields from Wunderbuild: ${Object.keys(found[0] || {}).slice(0, 25).join(", ")} | saved-by name: ${savedBy || "not reported"}`);
         for (const row of $("attList").children) row.children[0].checked = false; // already filed: tick one again to save it separately
       }
-      if (isCompose()) note.textContent = both ? "This email was already saved to Wunderbuild. Save and send will update the saved copy, then send it." : "Part of this email was saved earlier. Save and send will save it again.";
+      if (isCompose()) note.textContent = both ? "This email was already saved to Wunderbuild. Save and Send will update the saved copy, then send it." : "Part of this email was saved earlier. Save and Send will save it again.";
       else if (!both) note.textContent = "Part of this email was saved earlier. Saving will add what is missing.";
     }
     // The email that was replied to (sent earlier than the saved reply) counts as saved when its reply was saved to this job.
@@ -1652,7 +1653,7 @@ $("prepFolders").addEventListener("click", async () => {
   const btn = $("prepFolders"), note = $("prepNote");
   if (btn.dataset.busy) { prepRun++; return; } // pressed again while running = stop
   if (!$("key").value.trim()) { note.textContent = "Add your API key first."; return; }
-  const run = ++prepRun; btn.dataset.busy = "1"; btn.textContent = "Stop loading folder lists";
+  const run = ++prepRun; btn.dataset.busy = "1"; btn.textContent = "Stop Loading Folder Lists";
   let done = 0, failed = 0, total = 0, emails = 0;
   try {
     note.textContent = "Getting the job list…";
@@ -1674,7 +1675,7 @@ $("prepFolders").addEventListener("click", async () => {
     if (total) note.textContent = run === prepRun ? `Done: ${done - failed} of ${total} jobs saved (${emails} saved emails found)${failed ? `, ${failed} could not be read (run it again to retry them)` : ""}.` : `Stopped after ${done} of ${total} jobs. Run it again to carry on.`;
     diag("folders", `set-up: ${done - failed} of ${total} jobs saved, ${failed} failed, ${emails} saved emails found`);
   } catch (e) { note.textContent = `Could not finish: ${describeError(e)}`; }
-  delete btn.dataset.busy; btn.textContent = "Load folder lists and saved emails for all jobs (set-up)";
+  delete btn.dataset.busy; btn.textContent = "Load Folder Lists and Saved Emails for All Jobs (Set-Up)";
 });
 
 $("signOut").addEventListener("click", () => {
@@ -1689,7 +1690,7 @@ $("signOut").addEventListener("click", () => {
 let sending = false, pendingRefresh = false;
 function lockUI(on) {
   if (on) $("send").disabled = true;
-  $("q").disabled = on; $("name").disabled = on; $("wbAttachBtn").disabled = on || !job; $("browseBtn").disabled = on || !job; $("brClose").disabled = on; $("brGo").disabled = on || brPicked.size === 0; $("wbClearBtn").disabled = on; $("subjPrefix").disabled = on; $("attMode").disabled = on; $("pickGo").disabled = on;
+  $("q").disabled = on; $("chosen").disabled = on; $("name").disabled = on; $("wbAttachBtn").disabled = on || !job; $("browseBtn").disabled = on || !job; $("brClose").disabled = on; $("brGo").disabled = on || brPicked.size === 0; $("wbClearBtn").disabled = on; $("subjPrefix").disabled = on; $("attMode").disabled = on; $("pickGo").disabled = on;
   $("folder").disabled = on || !job; $("attFolder").disabled = on || !job;
   for (const el of $("attList").querySelectorAll("input,select")) el.disabled = on;
   for (const el of $("jobs").querySelectorAll("button")) el.disabled = on;
@@ -1947,13 +1948,13 @@ $("send").addEventListener("click", async () => {
     if (!snap.compose && !problems.length) { dupFound = true; if (!savedAt) savedAt = new Date(); if (!savedBy) savedBy = myFirstName(); } // everything saved: the button turns into the green "Sent to Wunderbuild"
     const wantSend = snap.compose; // a draft is always sent as it is saved, so the saved copy matches what went out
     if (wantSend && problems.length) {
-      msg = `Saved, but not sent. ${msg} The email has NOT been sent because of the problems above. Fix them and press Save and send again (the saved copy is replaced, not added twice), or send it yourself.`;
+      msg = `Saved, but not sent. ${msg} The email has NOT been sent because of the problems above. Fix them and press Save and Send again (the saved copy is replaced, not added twice), or send it yourself.`;
     } else if (wantSend) {
       setStatus(msg + " Sending…", "busy");
       try { await sendDraft(); msg += " Email sent."; }
       catch (e) {
         msg += e.message === "unsupported" ? " Saved. This version of Outlook cannot send from the add-in, so click Outlook's Send button now."
-          : ` Saved, but not sent (${e.message}). Press Save and send again to retry (the saved copy is replaced, not added twice), or click Send yourself.`;
+          : ` Saved, but not sent (${e.message}). Press Save and Send again to retry (the saved copy is replaced, not added twice), or click Send yourself.`;
         problems.push("not sent");
       }
     }
