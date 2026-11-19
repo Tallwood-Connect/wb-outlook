@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.107"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.108"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -1133,7 +1133,8 @@ async function buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId, d
     .map((d) => ({ d, m: /^\d{4}-\d{2}-\d{2} - (.*?)(?: \(\d+\))?\.pdf$/i.exec(d.name || "") }))
     .filter((x) => x.m && x.m[1].trim().toLowerCase() === tail)
     .map((x) => x.d).sort((a, b) => String(b.name).localeCompare(String(a.name))).slice(0, 12).forEach(add); // up to 12 same-subject PDFs, so the real conversation PDF is not lost among many
-  if (!cands.length) { // a new subject (or a changed one) with nothing remembered: the newest recent PDFs of this folder are also looked at; the email joins one only if its messages really belong to it
+  // An email with no quoted earlier message and no conversation id cannot belong to an older PDF, so the (slow) look at recent PDFs is skipped for it.
+  if (!cands.length && ((probe.quoteCount || 0) > 0 || probe.convId)) { // a new subject (or a changed one) with nothing remembered: the newest recent PDFs of this folder are also looked at; the email joins one only if its messages really belong to it
     const cutoff = Date.now() - 30 * 86400000;
     (docs || []).filter((d) => isPdfDoc(d) && !d.isDeleted).map((d) => ({ d, m: /^(\d{4}-\d{2}-\d{2}) - /.exec(d.name || "") }))
       .filter((x) => x.m && new Date(x.m[1]).getTime() >= cutoff)
@@ -1422,6 +1423,32 @@ function getAttachment(a) {
   });
 }
 
+// Attachments of a draft are read from Outlook quietly in the background while the email is being written, so pressing Save and Send does not wait for them.
+// An attachment's content never changes, so a copy is kept for the open item (up to about 60 MB) and dropped when another email is selected.
+const attCache = new Map();
+const ATT_CACHE_MAX = 60 * 1024 * 1024;
+function cachedAttachment(a) {
+  if (!attCache.has(a.id)) { const p = getAttachment(a); attCache.set(a.id, p); p.catch(() => attCache.delete(a.id)); }
+  return attCache.get(a.id);
+}
+let prefetchBusy = false;
+async function prefetchAttachments() {
+  if (prefetchBusy || sending || !cur || !isCompose()) return;
+  prefetchBusy = true;
+  try {
+    const it = Office.context.mailbox.item;
+    const atts = await asyncVal((cb) => it.getAttachmentsAsync(cb));
+    let held = 0;
+    for (const a of atts || []) held += attCache.has(a.id) ? (a.size || 0) : 0;
+    for (const a of atts || []) {
+      if (sending || !isCompose() || Office.context.mailbox.item !== it) break; // the person has started saving, or moved to another email
+      if (attCache.has(a.id) || held + (a.size || 0) > ATT_CACHE_MAX) continue;
+      held += a.size || 0;
+      try { await cachedAttachment(a); } catch { /* read again when saving */ }
+    }
+  } catch { /* only a head start: saving reads whatever is missing */ }
+  prefetchBusy = false;
+}
 
 /* ---------- keeping browser storage small ---------- */
 // Old folder lists, saved-email indexes and saved marks were never removed, so a PC with many jobs slowly filled its 5 MB, after which saving
@@ -1569,7 +1596,7 @@ $("prepFolders").addEventListener("click", async () => {
 $("signOut").addEventListener("click", () => {
   jobsCache = null; jobsAt = 0;
   purge((k) => k.startsWith("wb_"));
-  $("key").value = ""; $("base").value = DEFAULT_BASE; $("fmtPdf").checked = true; $("convPdf").checked = true; $("askSend").checked = false; $("subjPrefix").checked = false; syncSwitch(); loadPrefs();
+  $("key").value = ""; $("base").value = DEFAULT_BASE; $("fmtPdf").checked = true; $("convPdf").checked = true; $("askSend").checked = false; $("sendFirst").checked = true; $("subjPrefix").checked = false; syncSwitch(); loadPrefs();
   try { const rs = Office.context.roamingSettings; rs.set("wb_ask", false); rs.remove("wb_key"); rs.remove("wb_base"); rs.saveAsync(() => {}); } catch { /* ignore */ } // the copy kept in the mailbox goes too
   clearJob();
   $("clearNote").textContent = "Your key and all saved data were removed from this computer.";
@@ -1629,6 +1656,7 @@ $("send").addEventListener("click", async () => {
   diag("save", `started (${isCompose() ? "email being written" : "received email"})`);
   let convLock = null; // held while a conversation PDF is being replaced
   let emailLock = null; // held while this one email is being saved
+  let sentEarly = false; // true when the email was sent before it was saved (the "send first" setting)
   try {
     const baseName = cleanName($("name").value).trim().replace(/\.(eml|pdf|msg)$/i, "");
     if (corrMissing && job) { setStatus("Creating Correspondence folder…", "busy"); await createCorrespondence(job); }
@@ -1645,7 +1673,7 @@ $("send").addEventListener("click", async () => {
     const idPromise = emailId(snap); // identity of the email that is open right now
     const useFmt = $("fmtPdf").checked;
     const memo = new Map();
-    const readAtt = (a) => { if (!memo.has(a.id)) memo.set(a.id, getAttachment(a).then((f) => ({ f }), (e) => ({ e }))); return memo.get(a.id); };
+    const readAtt = (a) => { if (!memo.has(a.id)) memo.set(a.id, cachedAttachment(a).then((f) => ({ f }), (e) => ({ e }))); return memo.get(a.id); };
     const perFile = $("attMode").checked; // a folder chosen for each attachment, or one folder for all
     const reads = atts.map(({ att, typed, cb, folder }) => readAtt(att).then((r) => ({ att, typed, cb, folder, f: r.f, e: r.e })));
     const itemAtStart = snap.compose ? "" : openItemKey();
@@ -1678,6 +1706,16 @@ $("send").addEventListener("click", async () => {
       if (built.skipped) problems.push(`${built.skipped} attachment${built.skipped === 1 ? "" : "s"} could not be included in the rebuilt email file`);
     }
 
+    // Send first: everything has been read from the draft, so the email is sent now and saved in the background (the panel stays busy until the save is done).
+    if (snap.compose && $("sendFirst").checked && !problems.length && !forceResave && job && typeof Office.context.mailbox.item.sendAsync === "function") {
+      try {
+        setStatus("Sending… saving to Wunderbuild continues in the background.", "busy");
+        await markSaved(snap); // the send-time prompt must not ask again
+        await sendDraft();
+        sentEarly = true;
+        diag("save", `email sent first, after ${Math.round((Date.now() - saveStart) / 100) / 10} s`);
+      } catch (e) { diag("save", `send first did not work (${e && e.message}); saving first instead`); }
+    }
     const exactPics = useFmt && !snap.compose && eml && emlB64 ? await exactPictures(eml, bodyHtml) : new Map();
     // Check, right now, whether this email is already in the job (e.g. a colleague saved it first).
     const id = await idPromise;
@@ -1818,7 +1856,7 @@ $("send").addEventListener("click", async () => {
     if (id) rememberSaved(id, jobAtSend._id);
     if (snap.compose) saveReplyRecord(convId, jobAtSend);
     if (snap.compose && pdfDoc && !convUsed) snap.pdfRef = `${jobAtSend._id}:${pdfDoc._id}`; // so the next save of this draft can replace this PDF
-    await markSaved(snap);
+    if (!sentEarly) await markSaved(snap); // an email sent first has already been marked, and its draft is gone
 
     let msg;
     if (duplicate) {
@@ -1835,7 +1873,8 @@ $("send").addEventListener("click", async () => {
     if (notes.length) msg += ` Note: ${notes.join("; ")}.`;
     if (problems.length) msg += ` Problems: ${problems.join("; ")}.`;
     if (!snap.compose && !problems.length) { dupFound = true; if (!savedAt) savedAt = new Date(); if (!savedBy) savedBy = myFirstName(); } // everything saved: the button turns into the green "Sent to Wunderbuild"
-    const wantSend = snap.compose; // a draft is always sent as it is saved, so the saved copy matches what went out
+    if (sentEarly) msg = `Email sent. ${msg}${problems.length ? " The email has already gone, so only the saving needs attention: open it in Sent Items and save it from there." : ""}`;
+    const wantSend = snap.compose && !sentEarly; // a draft is always sent as it is saved, so the saved copy matches what went out
     if (wantSend && problems.length) {
       msg = `Saved, but not sent. ${msg} The email has NOT been sent because of the problems above. Fix them and press Save and Send again (the saved copy is replaced, not added twice), or send it yourself.`;
     } else if (wantSend) {
@@ -1851,8 +1890,9 @@ $("send").addEventListener("click", async () => {
     lastResult = { msg, kind: problems.length ? "err" : "ok", subject: snap.subject };
     setStatus(msg, lastResult.kind);
   } catch (e) {
-    lastResult = { msg: e.message, kind: "err", subject: "" };
-    setStatus(e.message, "err");
+    const failMsg = sentEarly ? `The email was sent, but it was NOT saved to Wunderbuild. ${e.message} Open it in Sent Items and save it from there.` : e.message;
+    lastResult = { msg: failMsg, kind: "err", subject: "" };
+    setStatus(failMsg, "err");
   } finally {
     releaseConvLock(convLock); releaseConvLock(emailLock);
     sending = false; lockUI(false); refreshSend();
@@ -1884,8 +1924,10 @@ let nameEdited = false; // true once the person types in the file name box thems
 let subjectTimer = null;
 function startSubjectWatch() {
   if (subjectTimer) return;
+  let tick = 0;
   subjectTimer = setInterval(async () => {
     if (sending || subjBusy || !cur || !isCompose()) return;
+    if (++tick % 4 === 0 && job) prefetchAttachments(); // every 8 seconds, once a job is chosen
     try {
       const it = Office.context.mailbox.item;
       const subject = await asyncVal((cb) => it.subject.getAsync(cb));
@@ -1903,6 +1945,7 @@ let lastComposeItem = null;
 async function refreshForItem(keepStatus) {
   const run = ++snapRun;
   justSaved = null;
+  attCache.clear();
   clearJob();
   const snap = await loadSnapshot();
   if (run !== snapRun) return; // another email was selected meanwhile
@@ -2226,6 +2269,7 @@ $("pcFiles").addEventListener("change", async () => {
   }
   setStatus(attachSummary({ done, failed }), failed.length ? "err" : "ok");
 });
+$("sendFirst").addEventListener("change", () => store.set("wb_sendfirst", $("sendFirst").checked ? "1" : "0"));
 $("fmtPdf").addEventListener("change", () => store.set("wb_fmtpdf", $("fmtPdf").checked ? "1" : "0"));
 $("convPdf").addEventListener("change", () => store.set("wb_convpdf", $("convPdf").checked ? "1" : "0"));
 
@@ -2248,6 +2292,7 @@ Office.onReady(async () => {
   { const savedBase = store.get("wb_base"), movedBase = moveWorkerHost(savedBase); if (savedBase && movedBase !== savedBase) { store.set("wb_base", movedBase); diag("settings", "the Worker address was switched to the new workers.dev name"); } }
   $("base").value = store.get("wb_base") || DEFAULT_BASE;
   $("fmtPdf").checked = store.get("wb_fmtpdf") !== "0";
+  $("sendFirst").checked = store.get("wb_sendfirst") !== "0"; // on unless switched off
   $("convPdf").checked = store.get("wb_convpdf") !== "0"; // on unless switched off
   $("subjPrefix").checked = true; // Auto is always the starting choice
   try { $("askSend").checked = Office.context.roamingSettings.get("wb_ask") === true; } catch { /* settings unavailable */ }
