@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.116"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.117"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://wb-proxy.tallwood.workers.dev/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -67,6 +67,7 @@ function refreshSend() {
   const compose = isCompose();
   const attOn = !compose && selectedAttachments().length > 0;
   const btn = $("send");
+  try { refreshMultiButton(); } catch { /* the multi-select section is not set up yet */ }
   if (dupFound && !compose && !(attOn && ready)) { btn.textContent = "Sent to Wunderbuild"; btn.className = "done"; btn.disabled = true; }
   else {
     btn.className = "";
@@ -617,8 +618,8 @@ const cleanName = (t, max) => {
     .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
   return max ? Array.from(c).slice(0, max).join("") : c;
 };
-function suggestName() {
-  const item = cur;
+function suggestName(forItem) {
+  const item = forItem || cur;
   if (!item) return "";
   const d = item.date;
   const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; // local date, not UTC
@@ -2448,6 +2449,74 @@ $("pcFiles").addEventListener("change", async () => {
   }
   setStatus(attachSummary({ done, failed }), failed.length ? "err" : "ok");
 });
+/* ---------- several emails selected at once (Outlook 1.15 and later, manifest 1.0.0.20) ---------- */
+let multiSel = [];
+const multiSupported = () => { try { return Office.context.requirements.isSetSupported("Mailbox", "1.15") && typeof Office.context.mailbox.getSelectedItemsAsync === "function"; } catch { return false; } };
+function refreshMultiButton() { $("multiSave").disabled = !(job && multiSel.length && !foldersFailed && !foldersPending) || sending; }
+async function refreshMulti() {
+  let items = [];
+  if (multiSupported()) {
+    try { items = await new Promise((res) => Office.context.mailbox.getSelectedItemsAsync((r) => res(r.status === Office.AsyncResultStatus.Succeeded && Array.isArray(r.value) ? r.value : []))); } catch { items = []; }
+  }
+  multiSel = items.length > 1 ? items : [];
+  $("multi").hidden = !multiSel.length;
+  if (multiSel.length) {
+    $("multiTitle").textContent = `${multiSel.length} emails selected`;
+    $("multiList").replaceChildren(...multiSel.slice(0, 50).map((s) => { const li = document.createElement("li"); li.textContent = cleanName(s.subject || "(no subject)", 90); return li; }));
+    if (multiSel.length > 50) { const li = document.createElement("li"); li.textContent = `…and ${multiSel.length - 50} more`; $("multiList").appendChild(li); }
+  }
+  refreshMultiButton();
+}
+$("multiSave").addEventListener("click", async () => {
+  if (sending || !job || !multiSel.length) return;
+  const jobAtStart = job, list = multiSel.slice(0, 50), results = [];
+  sending = true; lockUI(true); $("multiSave").disabled = true;
+  diag("multi", `saving ${list.length} selected emails`);
+  try {
+    const folderId = $("folder").value;
+    if (corrMissing) { setStatus("Creating Correspondence folder…", "busy"); await createCorrespondence(jobAtStart); }
+    setStatus("Looking at the job's folders…", "busy");
+    const seen = await findExisting(jobAtStart, $("folder").value, "no-such-reference");
+    const usedNames = new Set((seen.all || []).map((d) => String(d.name || "").toLowerCase()));
+    const ofId = await ensureOutlookFolder(folderId, jobAtStart._id);
+    for (let i = 0; i < list.length; i++) {
+      const sel = list[i], label = cleanName(sel.subject || "(no subject)", 60);
+      let loaded = null, lock = null;
+      try {
+        setStatus(`Saving email ${i + 1} of ${list.length}: ${label}…`, "busy");
+        loaded = await new Promise((res, rej) => Office.context.mailbox.loadItemByIdAsync(sel.itemId, (r) => (r.status === Office.AsyncResultStatus.Succeeded ? res(r.value) : rej(new Error(r.error.message)))));
+        const snap = { compose: false, subject: loaded.subject || "", from: loaded.from, to: loaded.to || [], cc: loaded.cc || [], bcc: [], date: loaded.dateTimeCreated ? new Date(loaded.dateTimeCreated) : new Date(), attachments: loaded.attachments || [], conversationId: loaded.conversationId, internetMessageId: loaded.internetMessageId, wbId: null, props: null };
+        const id = await emailId(snap);
+        if ([...usedNames].some((n) => n.includes(`[${id}]`))) { results.push(`${label}: already saved`); continue; }
+        lock = await acquireConvLock(`${jobAtStart._id}:email:${id}`, "this email");
+        const baseName = suggestName(snap), meta = emailMeta(snap);
+        const [bodyText, bodyHtml, emlB64] = await Promise.all([
+          new Promise((res, rej) => loaded.body.getAsync(Office.CoercionType.Text, (r) => (r.status === Office.AsyncResultStatus.Succeeded ? res(r.value) : rej(new Error(r.error.message))))),
+          new Promise((res) => loaded.body.getAsync(Office.CoercionType.Html, (r) => res(r.status === Office.AsyncResultStatus.Succeeded ? r.value : ""))),
+          new Promise((res) => (typeof loaded.getAsFileAsync === "function" ? loaded.getAsFileAsync((r) => res(r.status === Office.AsyncResultStatus.Succeeded ? r.value : null)) : res(null))),
+        ]);
+        const emlBytes = emlB64 ? b64ToBytes(emlB64) : (await buildDraftEml(Object.assign({}, snap, { wbId: id }), bodyHtml, bodyText, async () => ({ e: new Error("attachments are not read here") }))).bytes;
+        let pdf = null;
+        if ($("fmtPdf").checked && bodyHtml) { try { pdf = await renderPdf(buildEmailHtml({ subject: snap.subject, meta, bodyHtml, cid: buildCidMap(bodyHtml, [], () => {}, new Map()) })); } catch (e) { diag("multi", `formatted PDF not available (${e.message})`); } }
+        if (!pdf) pdf = emailToPdf({ subject: snap.subject, meta, body: bodyText });
+        let pdfName = `${baseName}.pdf`;
+        for (let n = 2; usedNames.has(pdfName.toLowerCase()) && n < 100; n++) pdfName = `${baseName} (${n}).pdf`;
+        usedNames.add(pdfName.toLowerCase());
+        const emlName = `${baseName} [${id}].eml`;
+        const [p, e] = await Promise.allSettled([uploadFile(pdfName, "application/pdf", pdf, folderId, jobAtStart._id), uploadFile(emlName, "message/rfc822", emlBytes, ofId, jobAtStart._id)]);
+        usedNames.add(emlName.toLowerCase());
+        if (p.status === "rejected") { if (e.status === "fulfilled" && e.value && e.value._id) await removeOrJot(jobAtStart._id, e.value._id); throw p.reason; } // nothing half saved
+        if (e.status === "rejected") { results.push(`${label}: PDF saved, original email not saved (${e.reason.message})`); continue; }
+        rememberSaved(id, jobAtStart._id); shareSaved(id, jobAtStart._id);
+        results.push(`${label}: saved`);
+      } catch (err) { results.push(`${label}: NOT saved (${err.message})`); diag("multi", `${label}: ${err.message}`); }
+      finally { releaseConvLock(lock); if (loaded && typeof loaded.unloadAsync === "function") { try { loaded.unloadAsync(() => {}); } catch { /* ignore */ } } }
+    }
+  } catch (err) { results.push(`Stopped: ${err.message}`); }
+  finally { sending = false; lockUI(false); refreshSend(); refreshMultiButton(); }
+  const bad = results.filter((r) => /NOT saved|Stopped|not saved/.test(r)).length;
+  setStatus(`${results.filter((r) => /: saved$/.test(r)).length} of ${list.length} saved to ${jobAtStart.name}.${bad ? ` ${bad} had a problem:` : ""}\n${results.join("\n")}`, bad ? "err" : "ok");
+});
 $("fmtPdf").addEventListener("change", () => store.set("wb_fmtpdf", $("fmtPdf").checked ? "1" : "0"));
 $("convPdf").addEventListener("change", () => store.set("wb_convpdf", $("convPdf").checked ? "1" : "0"));
 
@@ -2480,7 +2549,9 @@ Office.onReady(async () => {
   applyMode();
   // The pane stays open while other items are selected, and the same pane can show a received email or an email
   // being written (e.g. an inline reply), so the mode is re-checked every time the item changes.
-  Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { applyMode(); if (sending) { pendingRefresh = true; return; } refreshForItem(false); });
+  Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { applyMode(); refreshMulti(); if (sending) { pendingRefresh = true; return; } refreshForItem(false); });
+  if (multiSupported()) { try { Office.context.mailbox.addHandlerAsync(Office.EventType.SelectedItemsChanged, () => { refreshMulti(); if (!sending && !Office.context.mailbox.item) refreshForItem(false); }); } catch { /* not available in this Outlook */ } }
+  refreshMulti();
   await refreshForItem(false);
   // Once the panel is up and quiet, the PDF tools are fetched in the background so saving does not wait for them.
   if ($("fmtPdf").checked) setTimeout(() => { (($("convPdf").checked) ? loadConvTools() : loadThreadTool()).catch(() => {}); }, 2500);
