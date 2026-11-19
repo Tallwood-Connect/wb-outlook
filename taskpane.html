@@ -6,7 +6,7 @@
 <meta http-equiv="Content-Security-Policy" content="object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>Send to Wunderbuild</title>
 <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
-<script src="channel.js?v=1.124"></script>
+<script src="channel.js?v=1.125"></script>
 <style>
   :root{--ink:#0f2438;--muted:#5a6b7a;--line:#d3dce4;--bg:#fff;--soft:#f1f5f8;--brand:#2b976f;--accent:#1d7a57;--bad:#a4262c;--ok:#1d7a57;--navy:#0f2438}
   @media (prefers-color-scheme:dark){:root{--ink:#e6edf3;--muted:#98a9b8;--line:#2a3f54;--bg:#0b1a28;--soft:#12283b;--brand:#2b976f;--accent:#4fc59a;--bad:#f1707b;--ok:#4fc59a;--navy:#08141f}}
@@ -62,6 +62,9 @@
   .brFolder:hover{border-color:var(--accent)}
   #brFiles{margin:8px 0 12px}
   #brGo{width:100%;position:sticky;bottom:0;background:var(--bg)}
+  #brNew{width:100%;margin:6px 0}
+  #brNewRow{display:flex;gap:6px;margin:6px 0}#brNewRow input{flex:1;min-width:0}#brNewRow .sec{margin:0;flex:none}
+  #attPick{width:100%;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .chk{display:flex;gap:6px;align-items:baseline;font-weight:400}
   .chk input{width:auto}
   #matchNote,#autoNote{margin-top:6px;color:var(--muted);font-size:12px}
@@ -124,7 +127,7 @@
 })();
 </script>
 
-<h1>Send to Wunderbuild <span id="ver" data-v="1.124"></span></h1>
+<h1>Send to Wunderbuild <span id="ver" data-v="1.125"></span></h1>
 
 <details id="settings">
   <summary>API Settings</summary>
@@ -197,8 +200,9 @@
     <span class="swt" id="swEach">Individual</span>
   </div>
   <div id="attList"></div>
-  <label for="attFolder" id="attFolderLabel">Save Attachments to</label>
-  <select id="attFolder" disabled><option value="">Choose a job first</option></select>
+  <label for="attPick" id="attFolderLabel">Save Attachments to</label>
+  <button type="button" class="sec" id="attPick" disabled aria-label="Save attachments to this folder. Press to browse for another folder">Choose a job first</button>
+  <select id="attFolder" hidden disabled aria-hidden="true" tabindex="-1"><option value="">Choose a job first</option></select>
 </div>
 
 <button id="send" disabled>Send to Wunderbuild</button>
@@ -227,16 +231,18 @@
 </details>
 
 <div id="browse" role="dialog" aria-modal="true" aria-label="Browse files" hidden>
-  <div id="brHead"><b>Browse Files</b><button type="button" class="sec" id="brClose">Close</button></div>
+  <div id="brHead"><b id="brTitle">Browse Files</b><button type="button" class="sec" id="brClose">Close</button></div>
   <div id="brNav"><button type="button" class="sec" id="brBack" disabled>◂ Back</button><span id="brPath"></span></div>
   <div id="brStatus" role="status"></div>
   <div id="brFolders"></div>
   <div id="brFiles"></div>
+  <div id="brNewRow" hidden><input id="brNewName" type="text" autocomplete="off" placeholder="New folder name" aria-label="New folder name"><button type="button" class="sec" id="brNewGo">Create</button></div>
+  <button type="button" class="sec" id="brNew" hidden>New Folder Here</button>
   <button type="button" class="sec" id="brGo" disabled>Attach Selected</button>
 </div>
 
-<script src="pdf.js?v=1.124"></script>
-<script src="eml.js?v=1.124"></script>
-<script src="taskpane.js?v=1.124"></script>
+<script src="pdf.js?v=1.125"></script>
+<script src="eml.js?v=1.125"></script>
+<script src="taskpane.js?v=1.125"></script>
 </body>
 </html>

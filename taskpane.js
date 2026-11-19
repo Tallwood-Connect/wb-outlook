@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.124"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.125"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://wb-proxy.tallwood.workers.dev/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -551,6 +551,7 @@ async function loadFolders() {
   const sel = $("folder"), af = $("attFolder");
   sel.disabled = true; af.disabled = true; $("send").disabled = true;
   sel.innerHTML = ""; af.innerHTML = "";
+  $("attPick").textContent = "Loading folders…"; $("attPick").disabled = true;
   sel.add(new Option("Loading folders…", ""));
   setStatus("Loading folders…", "busy");
   $("corrNote").hidden = true;
@@ -567,6 +568,7 @@ async function loadFolders() {
     const corr = findNamedOption(sel.options, "Correspondence");
     if (keepSel !== null && [...sel.options].some((o) => o.value === keepSel)) sel.value = keepSel; else if (corr) sel.value = corr.value;
     for (const o of sel.options) af.add(new Option(o.text, o.value));
+    addExtraFolders(af, job._id); // folders picked or made in the pop-up that the cached list may not hold yet
     // Attachments default to "Working Documents"; otherwise the email's folder.
     const work = findNamedOption(af.options, "Working Documents");
     if (keepAf !== null && [...af.options].some((o) => o.value === keepAf)) af.value = keepAf; else af.value = work ? work.value : sel.value;
@@ -925,11 +927,18 @@ async function attachDocs(forJob, items, say) {
 const attachSummary = (r) => `${r.done ? `Attached ${r.done} file${r.done === 1 ? "" : "s"} to your email. ` : ""}${r.failed.length ? `Not attached: ${r.failed.join("; ")}` : ""}`;
 
 /* ---------- "Browse files…": a pop-up over the panel to walk through the job's folders ---------- */
-let brRun = 0, brStack = [], brPicked = new Map(), brDone = new Set();
+// The same pop-up also picks a folder ("pick" mode, used for "Save Attachments to"): it lists folders only, can make a new folder, and hands the choice back.
+let brRun = 0, brStack = [], brPicked = new Map(), brDone = new Set(), brMode = "attach", brPickCb = null, brSubs = [];
 const brLabel = () => brStack.map((f) => f.name).join(" / ");
 function brSay(msg, cls) { $("brStatus").textContent = msg || ""; $("brStatus").className = cls || ""; }
-function brUpdate() { const n = brPicked.size; $("brGo").disabled = sending || !n; $("brGo").textContent = n ? `Attach selected (${n})` : "Attach selected"; $("brBack").disabled = brStack.length < 2 || sending; }
-function closeBrowse() { brRun++; $("browse").hidden = true; brPicked = new Map(); brDone = new Set(); brStack = []; }
+function brUpdate() {
+  const n = brPicked.size, pick = brMode === "pick";
+  $("brGo").disabled = sending || (!pick && !n);
+  $("brGo").textContent = pick ? "Use This Folder" : n ? `Attach selected (${n})` : "Attach selected";
+  $("brBack").disabled = brStack.length < 2 || sending;
+  $("brNew").hidden = !pick || !$("brNewRow").hidden; $("brNew").disabled = sending;
+}
+function closeBrowse() { brRun++; $("browse").hidden = true; brPicked = new Map(); brDone = new Set(); brStack = []; brMode = "attach"; brPickCb = null; $("brNewRow").hidden = true; $("brNewName").value = ""; $("brTitle").textContent = "Browse Files"; $("brNew").hidden = true; }
 async function browseLoad() {
   const run = ++brRun, forJob = job, top = brStack[brStack.length - 1];
   if (!forJob) return closeBrowse();
@@ -938,10 +947,11 @@ async function browseLoad() {
   try {
     const [detail, docs] = await Promise.all([
       api(top.id ? `/documents/job/${forJob._id}/folders/${top.id}` : `/documents/job/${forJob._id}/folders`),
-      listDocs(forJob._id, top.id),
+      brMode === "pick" ? Promise.resolve([]) : listDocs(forJob._id, top.id),
     ]);
     if (run !== brRun || job !== forJob) return;
     const subs = (detail.subFolders || []).slice().sort(byName);
+    brSubs = subs;
     docs.sort(byName);
     for (const f of subs) {
       const b = document.createElement("button"); b.type = "button"; b.className = "brFolder"; b.textContent = `📁 ${f.name}`;
@@ -958,7 +968,7 @@ async function browseLoad() {
       const sz = document.createElement("small"); sz.textContent = sizeText(d.size);
       row.appendChild(cb); row.appendChild(nm); row.appendChild(sz); $("brFiles").appendChild(row);
     }
-    brSay(subs.length || docs.length ? "" : "This folder is empty.");
+    brSay(subs.length || docs.length ? "" : brMode === "pick" ? "No folders inside this one." : "This folder is empty.");
     brUpdate();
   } catch (e) { if (run === brRun) brSay(e.message, "err"); }
 }
@@ -984,7 +994,71 @@ async function attachBrowsed() {
 $("browseBtn").addEventListener("click", () => { refreshFolders("browse opened"); openBrowse(); });
 $("brClose").addEventListener("click", () => { if (!sending) { const done = brDone.size; closeBrowse(); if (done) setStatus(`Attached ${done} file${done === 1 ? "" : "s"} to your email.`, "ok"); } });
 $("brBack").addEventListener("click", () => { if (!sending && brStack.length > 1) { brStack.pop(); browseLoad(); } });
-$("brGo").addEventListener("click", attachBrowsed);
+$("brGo").addEventListener("click", () => (brMode === "pick" ? finishPick() : attachBrowsed()));
+
+// Folders picked or made in the pop-up can be newer than the job's cached folder list, so they are remembered and added to the attachment folder choices.
+const extraFolders = new Map(); // job id -> Map(folder id -> path)
+function rememberFolderChoice(id, path) { if (!id || !job) return; if (!extraFolders.has(job._id)) extraFolders.set(job._id, new Map()); extraFolders.get(job._id).set(id, path); }
+function addExtraFolders(sel, jobId) { for (const [id, p] of extraFolders.get(jobId) || []) if (![...sel.options].some((o) => o.value === id)) sel.add(new Option(p, id)); }
+// Opens the pop-up to choose a folder; done(id, path) is called with the choice ("" for the job's top level).
+function openPick(done) {
+  if (!job || sending) return;
+  brMode = "pick"; brPickCb = done; brPicked = new Map(); brDone = new Set();
+  brStack = [{ id: "", name: job.name ? String(job.name).slice(0, 40) : "Job documents" }];
+  $("brTitle").textContent = "Choose a Folder"; $("browse").hidden = false; brSay(""); browseLoad();
+}
+function finishPick() {
+  if (sending || brMode !== "pick" || !brStack.length) return;
+  const top = brStack[brStack.length - 1], path = brStack.slice(1).map((f) => f.name).join(" / "), cb = brPickCb;
+  rememberFolderChoice(top.id, path);
+  closeBrowse();
+  if (cb) cb(top.id, path);
+}
+async function createFolderHere() {
+  const name = cleanName($("brNewName").value).trim().replace(/[\\/:*?"<>|]+/g, "_");
+  if (!name || sending || !job || !brStack.length) return;
+  const forJob = job, top = brStack[brStack.length - 1], same = brSubs.find((f) => String(f.name || "").trim().toLowerCase() === name.toLowerCase());
+  let id = same ? same._id : "";
+  if (!id) {
+    sending = true; lockUI(true); brSay(`Creating "${name}"…`, "busy");
+    try {
+      const made = await api(`/documents/job/${forJob._id}/folders`, { method: "POST", body: JSON.stringify({ name, ...(top.id ? { parentId: top.id } : {}) }) });
+      id = made && made._id;
+      if (!id) { // the answer did not carry the new folder: look for it by name
+        const d = await api(top.id ? `/documents/job/${forJob._id}/folders/${top.id}` : `/documents/job/${forJob._id}/folders`);
+        const f = (d.subFolders || []).find((x) => String(x.name || "").trim().toLowerCase() === name.toLowerCase());
+        id = f && f._id;
+      }
+      if (!id) throw new Error("The folder was created but could not be found. Close this and open it again.");
+      dropTree(forJob._id); // the cached folder list is out of date now
+      diag("folders", `created folder "${name}" from the folder pop-up`);
+    } catch (e) { brSay(e.message, "err"); }
+    finally { sending = false; lockUI(false); refreshSend(); }
+  }
+  if (!id || job !== forJob || $("browse").hidden) { brUpdate(); return; }
+  $("brNewRow").hidden = true; $("brNewName").value = "";
+  brStack.push({ id, name }); // go into the new (or existing) folder, ready to be chosen
+  await browseLoad();
+}
+$("brNew").addEventListener("click", () => { if (sending) return; $("brNewRow").hidden = false; $("brNew").hidden = true; $("brNewName").focus(); });
+$("brNewGo").addEventListener("click", createFolderHere);
+$("brNewName").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); createFolderHere(); } });
+
+// The "Save Attachments to" button shows the chosen folder; the hidden list below it keeps the choice.
+function pickLabel(sel) { const o = sel.selectedOptions && sel.selectedOptions[0]; return o ? o.text : "Job documents (top level)"; }
+function syncAttPick() {
+  const af = $("attFolder"), b = $("attPick");
+  b.disabled = af.disabled || !job;
+  b.textContent = !job ? "Choose a job first" : af.options.length === 0 ? "Loading folders…" : `📁 ${pickLabel(af)}`;
+}
+function setFolderChoice(sel, id, path) {
+  const af = $("attFolder");
+  if (id && ![...af.options].some((o) => o.value === id)) af.add(new Option(path, id)); // the row lists are copies of this list
+  if (sel === af) { af.value = id; af.dispatchEvent(new Event("change")); } // un-ticks attachments already in that folder
+  else { fillAttRowSelects(); sel.value = id; sel.dataset.touched = "1"; }
+  fillAttRowSelects();
+}
+$("attPick").addEventListener("click", () => { if (!sending && job) openPick((id, path) => setFolderChoice($("attFolder"), id, path)); });
 
 // Email header block + the email's own HTML. Scripts are removed, and inline (cid:) images are embedded.
 // A tag that is never closed ("<p" or "<img" with no ">" before the next "<") is turned into plain text. Without this, the pattern matching below
@@ -1435,6 +1509,10 @@ function renderAttachments() {
     fs.addEventListener("change", () => { fs.dataset.touched = "1"; });
     row.appendChild(cb); row.appendChild(nm); row.appendChild(sz); row.appendChild(fs);
     if (extText) { const ex = document.createElement("span"); ex.className = "ext"; ex.textContent = extText; row.appendChild(ex); }
+    const fp = document.createElement("button"); // shows this attachment's folder and opens the folder pop-up
+    fp.type = "button"; fp.className = "sec fpick"; fp.hidden = true; fp.setAttribute("aria-label", `Folder for ${a.name}. Press to browse for another folder`);
+    fp.addEventListener("click", () => { if (!sending && job) openPick((id, path) => setFolderChoice(fs, id, path)); });
+    row.appendChild(fp);
     list.appendChild(row);
   });
   $("attMode").checked = false; // one folder for all is the standard
@@ -1472,13 +1550,16 @@ function fillAttRowSelects() {
     for (const o of src.options) sel.add(new Option(o.text, o.value));
     sel.value = keep !== null && [...sel.options].some((o) => o.value === keep) ? keep : src.value;
     sel.disabled = src.disabled;
+    const b = row.querySelector(".fpick");
+    if (b) { b.textContent = `📁 ${pickLabel(sel)}`; b.disabled = sel.disabled; }
   }
+  syncAttPick();
 }
 function syncAttMode() {
   const each = $("attMode").checked;
   $("swOne").classList.toggle("on", !each); $("swEach").classList.toggle("on", each);
-  $("attFolder").hidden = each; $("attFolderLabel").hidden = each;
-  for (const row of $("attList").children) if (row.children[3]) row.children[3].hidden = !each;
+  $("attPick").hidden = each; $("attFolderLabel").hidden = each; // the list itself stays hidden: it only holds the choice
+  for (const row of $("attList").children) { const b = row.querySelector(".fpick"); if (b) b.hidden = !each; }
 }
 // Rows are in the same order as currentAtts: [checkbox, name box, size].
 function selectedAttachments() {
@@ -1718,9 +1799,9 @@ $("signOut").addEventListener("click", () => {
 let sending = false, pendingRefresh = false;
 function lockUI(on) {
   if (on) $("send").disabled = true;
-  $("q").disabled = on; $("chosen").disabled = on; $("name").disabled = on; $("pcBtn").disabled = on; $("browseBtn").disabled = on || !job; $("brClose").disabled = on; $("brGo").disabled = on || brPicked.size === 0; $("wbClearBtn").disabled = on; $("subjPrefix").disabled = on; $("attMode").disabled = on;
-  $("folder").disabled = on || !job; $("attFolder").disabled = on || !job;
-  for (const el of $("attList").querySelectorAll("input,select")) el.disabled = on;
+  $("q").disabled = on; $("chosen").disabled = on; $("name").disabled = on; $("pcBtn").disabled = on; $("browseBtn").disabled = on || !job; $("brClose").disabled = on; $("brGo").disabled = on || (brMode !== "pick" && brPicked.size === 0); $("wbClearBtn").disabled = on; $("subjPrefix").disabled = on; $("attMode").disabled = on;
+  $("folder").disabled = on || !job; $("attFolder").disabled = on || !job; $("attPick").disabled = on || !job;
+  for (const el of $("attList").querySelectorAll("input,select,button")) el.disabled = on;
   for (const el of $("jobs").querySelectorAll("button")) el.disabled = on;
 }
 
