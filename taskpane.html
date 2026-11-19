@@ -125,6 +125,7 @@
 </script>
 
 <h1>Send to Wunderbuild <span id="ver" data-v="1.108"></span></h1>
+<div id="saveWarn" role="alert" hidden style="padding:10px 12px;background:#FDECEA;color:#7A1F17;border:1px solid #E8B4AE;border-radius:6px;margin:0 0 10px;font-size:13px;line-height:1.4"><span id="saveWarnText"></span> <button type="button" class="sec" id="saveWarnOk" style="margin-top:8px">Dismiss</button></div>
 
 <details id="settings">
   <summary>API Settings</summary>
@@ -146,7 +147,7 @@
 <details id="prefs">
   <summary>Settings</summary>
   <label class="chk"><input type="checkbox" id="askSend"> Ask Me to Save Sent Emails to Wunderbuild When I Click Send</label>
-  <label class="chk"><input type="checkbox" id="sendFirst"> Send Emails First, Then Save to Wunderbuild in the Background</label>
+  <label class="chk"><input type="checkbox" id="sendFirst"> Send Emails First, Then Save to Wunderbuild in the Background (Not for Pop-Out Windows)</label>
   <div class="grpHead">Automatic Subject: Include</div>
   <div class="opt"><span>Job number</span><label class="switch"><input type="checkbox" id="sjNum" role="switch" aria-label="Include the job number in the automatic subject"><span class="track"></span></label></div>
   <div class="opt"><span>Name</span><label class="switch"><input type="checkbox" id="sjName" role="switch" aria-label="Include the job name in the automatic subject"><span class="track"></span></label></div>

@@ -1596,7 +1596,7 @@ $("prepFolders").addEventListener("click", async () => {
 $("signOut").addEventListener("click", () => {
   jobsCache = null; jobsAt = 0;
   purge((k) => k.startsWith("wb_"));
-  $("key").value = ""; $("base").value = DEFAULT_BASE; $("fmtPdf").checked = true; $("convPdf").checked = true; $("askSend").checked = false; $("sendFirst").checked = true; $("subjPrefix").checked = false; syncSwitch(); loadPrefs();
+  $("key").value = ""; $("base").value = DEFAULT_BASE; $("fmtPdf").checked = true; $("convPdf").checked = true; $("askSend").checked = false; $("sendFirst").checked = false; $("subjPrefix").checked = false; syncSwitch(); loadPrefs();
   try { const rs = Office.context.roamingSettings; rs.set("wb_ask", false); rs.remove("wb_key"); rs.remove("wb_base"); rs.saveAsync(() => {}); } catch { /* ignore */ } // the copy kept in the mailbox goes too
   clearJob();
   $("clearNote").textContent = "Your key and all saved data were removed from this computer.";
@@ -1634,6 +1634,26 @@ function sendDraft() {
     catch (e) { reject(e); }
   });
 }
+// "Send first" leaves a note on this computer while the save is running. If the save fails, or the window it ran in is closed before it finishes,
+// any panel of the add-in (for example the one pinned to the main Outlook window) shows a warning, so a sent email that was not filed is not forgotten.
+const PENDING_KEY = "wb_pending_save", FAIL_KEY = "wb_save_failed";
+function finishEarlySave(subject, failure) {
+  let sub = subject; try { if (!sub) sub = (JSON.parse(store.get(PENDING_KEY) || "null") || {}).subject || ""; } catch { /* none */ }
+  store.remove(PENDING_KEY);
+  if (failure) store.set(FAIL_KEY, JSON.stringify({ at: Date.now(), subject: sub, msg: String(failure).slice(0, 400) })); else store.remove(FAIL_KEY);
+  checkSaveWarn();
+}
+function checkSaveWarn() {
+  let text = "";
+  try {
+    const f = JSON.parse(store.get(FAIL_KEY) || "null"), p = JSON.parse(store.get(PENDING_KEY) || "null");
+    if (f && Date.now() - f.at < 3 * 864e5) text = `Sent but NOT saved to Wunderbuild${f.subject ? `: "${f.subject}"` : ""}. Open it in Sent Items and save it from there. ${f.msg}`;
+    else if (p && Date.now() - p.at > 180000 && Date.now() - p.at < 3 * 864e5) text = `An email was sent${p.subject ? ` ("${p.subject}")` : ""}, but its saving to Wunderbuild did not finish (the window may have closed). Check the job's Correspondence folder; if it is missing, open it in Sent Items and save it from there.`;
+  } catch { /* nothing to show */ }
+  $("saveWarnText").textContent = text; $("saveWarn").hidden = !text;
+}
+$("saveWarnOk").addEventListener("click", () => { store.remove(FAIL_KEY); store.remove(PENDING_KEY); checkSaveWarn(); });
+setInterval(() => { try { checkSaveWarn(); } catch { /* ignore */ } }, 5000);
 function markSaved(snap) { // lets the send-time prompt know this draft has been saved
   return new Promise((resolve) => {
     if (!snap.compose || !snap.props) return resolve();
@@ -1711,10 +1731,11 @@ $("send").addEventListener("click", async () => {
       try {
         setStatus("Sending… saving to Wunderbuild continues in the background.", "busy");
         await markSaved(snap); // the send-time prompt must not ask again
+        store.set(PENDING_KEY, JSON.stringify({ at: Date.now(), subject: String(subject || "").slice(0, 80) })); // lets another panel warn if this one is closed before the save finishes
         await sendDraft();
         sentEarly = true;
         diag("save", `email sent first, after ${Math.round((Date.now() - saveStart) / 100) / 10} s`);
-      } catch (e) { diag("save", `send first did not work (${e && e.message}); saving first instead`); }
+      } catch (e) { store.remove(PENDING_KEY); diag("save", `send first did not work (${e && e.message}); saving first instead`); }
     }
     const exactPics = useFmt && !snap.compose && eml && emlB64 ? await exactPictures(eml, bodyHtml) : new Map();
     // Check, right now, whether this email is already in the job (e.g. a colleague saved it first).
@@ -1887,10 +1908,12 @@ $("send").addEventListener("click", async () => {
       }
     }
     diag("save", `finished in ${Math.round((Date.now() - saveStart) / 100) / 10} s${problems.length ? ` with ${problems.length} problem(s)` : ""}`);
+    if (sentEarly) finishEarlySave(subject, problems.length ? msg : "");
     lastResult = { msg, kind: problems.length ? "err" : "ok", subject: snap.subject };
     setStatus(msg, lastResult.kind);
   } catch (e) {
     const failMsg = sentEarly ? `The email was sent, but it was NOT saved to Wunderbuild. ${e.message} Open it in Sent Items and save it from there.` : e.message;
+    if (sentEarly) finishEarlySave("", failMsg);
     lastResult = { msg: failMsg, kind: "err", subject: "" };
     setStatus(failMsg, "err");
   } finally {
@@ -2292,7 +2315,7 @@ Office.onReady(async () => {
   { const savedBase = store.get("wb_base"), movedBase = moveWorkerHost(savedBase); if (savedBase && movedBase !== savedBase) { store.set("wb_base", movedBase); diag("settings", "the Worker address was switched to the new workers.dev name"); } }
   $("base").value = store.get("wb_base") || DEFAULT_BASE;
   $("fmtPdf").checked = store.get("wb_fmtpdf") !== "0";
-  $("sendFirst").checked = store.get("wb_sendfirst") !== "0"; // on unless switched off
+  $("sendFirst").checked = store.get("wb_sendfirst") === "1"; // off unless switched on: a pop-out window closes on send and would cut the save short
   $("convPdf").checked = store.get("wb_convpdf") !== "0"; // on unless switched off
   $("subjPrefix").checked = true; // Auto is always the starting choice
   try { $("askSend").checked = Office.context.roamingSettings.get("wb_ask") === true; } catch { /* settings unavailable */ }
