@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.106"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.107"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -1495,6 +1495,7 @@ async function uploadFile(name, type, bytes, folderId, jobId = job._id) {
       });
     }
     noteStorageHost(doc.uploadUrl, upVia);
+    if (!put.ok) { let why = ""; try { why = (await put.clone().text()).replace(/\s+/g, " ").slice(0, 200); } catch { /* no body */ } diag("upload", `${name}: ${bytes.length} bytes sent ${upVia === "Worker" ? "through the Worker" : "directly"}, answer ${put.status} ${why}`); }
     if (!put.ok) throw upVia === "Worker" ? await proxyFileError(put, `Saving ${name}`, (st) => `Upload of ${name} failed (${st}).`) : new Error(`Upload of ${name} failed (${put.status}).`);
     return doc;
   } catch (e) {
