@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.105"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.106"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -73,8 +73,7 @@ function refreshSend() {
     btn.textContent = dupFound && !compose ? "Save Attachments" : compose ? (canSendFromAddin() ? "Save and Send" : "Save to Wunderbuild") : "Send to Wunderbuild";
     btn.disabled = !ready || sending; // not while an attachment is being added or a save is running
   }
-  $("wbAttachBtn").disabled = !job || sending; $("browseBtn").disabled = !job || sending;
-  if (!job) $("wbPick").hidden = true;
+  $("pcBtn").disabled = sending; $("browseBtn").disabled = !job || sending;
   // Already filed: hide the saving settings; "Save Attachments Only" brings back the attachment ones.
   const filed = dupFound && !compose;
   $("main").className = filed ? (attOpen ? "filed attopen" : "filed") : "";
@@ -740,10 +739,7 @@ function buildCidMap(html, inl, note, exact) { // exact: Map(cid -> { type, byte
 
 /* ---------- attach files from Wunderbuild (emails being written only) ---------- */
 const MAX_ATTACH = 20 * 1024 * 1024; // keeps clear of Outlook's own attachment limits
-let pickRun = 0, pickDocs = [];
 const sizeText = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round((n || 0) / 1024))} KB`);
-function setPickStatus(msg, cls) { $("pickStatus").textContent = msg || ""; $("pickStatus").className = cls || ""; }
-function updatePickGo() { $("pickGo").disabled = sending || ![...$("pickList").querySelectorAll("input")].some((c) => c.checked && !c.disabled); }
 
 // Every folder of the job, however deeply nested, as a flat list of { id, path }. The folder list Wunderbuild
 // returns only goes a couple of levels down, so folders without sub-folders listed are asked about one by one.
@@ -827,112 +823,9 @@ function refreshFolders(why) {
     if (prev !== now && fillFolderLists) fillFolderLists(full); // only redrawn when something changed, so an open box is not closed under the person
   }).catch(() => {}).finally(() => { folderRefresh = null; });
 }
-// Every file in the job (folders are not included), so file names can be searched. Built once per job.
-let indexCache = null, indexProgress = () => {};
-function jobFileIndex(jobId) {
-  if (indexCache && indexCache.jobId === jobId) return indexCache.promise;
-  const p = (async () => {
-    const folders = await folderTree(jobId);
-    const files = []; let done = 0;
-    const queue = [...folders];
-    const worker = async () => {
-      while (queue.length) {
-        const f = queue.shift();
-        try { for (const d of await listDocs(jobId, f.id, true)) files.push({ d, path: f.path }); } catch { files.partial = true; }
-        indexProgress(++done, folders.length);
-      }
-    };
-    await Promise.all(Array.from({ length: 5 }, worker));
-    return files;
-  })();
-  indexCache = { jobId, promise: p };
-  p.catch(() => { if (indexCache && indexCache.promise === p) indexCache = null; });
-  return p;
-}
-function resetPicker() { closeBrowse(); $("wbPick").hidden = true; $("pickQ").value = ""; $("pickList").textContent = ""; pickDocs = []; pickRun++; indexCache = null; setPickStatus(""); }
+function resetPicker() { closeBrowse(); }
 
-function renderPickRows(items) { // items: [{ d, sub }]
-  const list = $("pickList");
-  list.textContent = ""; pickDocs = items.map((x) => x.d);
-  for (const x of items) {
-    const row = document.createElement("div"); row.className = "att";
-    const cb = document.createElement("input"); cb.type = "checkbox"; cb.setAttribute("aria-label", `Attach ${x.d.name}`);
-    cb.addEventListener("change", updatePickGo);
-    const nm = document.createElement("span"); nm.textContent = x.d.name;
-    const sz = document.createElement("small"); sz.textContent = x.sub;
-    row.appendChild(cb); row.appendChild(nm); row.appendChild(sz); list.appendChild(row);
-  }
-  updatePickGo();
-}
-async function loadPickList() {
-  const run = ++pickRun, forJob = job;
-  $("pickList").textContent = ""; pickDocs = []; updatePickGo();
-  if (!forJob) return;
-  try {
-    setPickStatus("Loading files…", "busy");
-    const docs = (await listDocs(forJob._id, $("pickFolder").value)).sort(byName);
-    if (run !== pickRun || job !== forJob) return;
-    setPickStatus(docs.length ? "" : "No files in this folder.");
-    renderPickRows(docs.map((d) => ({ d, sub: sizeText(d.size) })));
-  } catch (e) { if (run === pickRun) setPickStatus(e.message, "err"); }
-}
 const byName = (a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: "base" });
-async function runPickSearch() {
-  const q = $("pickQ").value.trim().toLowerCase();
-  if (!q) return loadPickList();
-  const run = ++pickRun, forJob = job;
-  if (!forJob) return;
-  $("pickList").textContent = ""; pickDocs = []; updatePickGo();
-  const words = q.split(/\s+/);
-  const folderEl = $("pickFolder"), folderName = folderEl.selectedOptions && folderEl.selectedOptions[0] ? folderEl.selectedOptions[0].text : "this folder";
-  // Matches in the folder being looked at appear first (one request); the rest of the job follows when it has been read.
-  const show = (files, note) => {
-    const ticked = new Set([...$("pickList").querySelectorAll("input")].map((c, i) => (c.checked && pickDocs[i] ? pickDocs[i]._id : null)).filter(Boolean));
-    const hits = files.filter((x) => words.every((w) => String(x.d.name).toLowerCase().includes(w))).sort((a, b) => byName(a.d, b.d));
-    const shown = hits.slice(0, 60);
-    renderPickRows(shown.map((x) => ({ d: x.d, sub: `${x.path} · ${sizeText(x.d.size)}` })));
-    [...$("pickList").querySelectorAll("input")].forEach((c, i) => { if (pickDocs[i] && ticked.has(pickDocs[i]._id)) c.checked = true; });
-    updatePickGo();
-    return { hits, shown };
-  };
-  let fullDone = false;
-  try {
-    setPickStatus("Reading the job's folders…", "busy");
-    indexProgress = (n, total) => { if (run === pickRun && !fullDone) setPickStatus(`${quickNote}Reading the other folders… ${n} of ${total}`, "busy"); };
-    var quickNote = "";
-    const quick = listDocs(forJob._id, folderEl.value).then((docs) => {
-      if (run !== pickRun || job !== forJob || fullDone) return;
-      const r = show(docs.map((d) => ({ d, path: folderName })));
-      quickNote = `${r.hits.length} match${r.hits.length === 1 ? "" : "es"} in ${folderName} so far. `;
-      setPickStatus(`${quickNote}Reading the other folders…`, "busy");
-    }).catch(() => {});
-    const files = await jobFileIndex(forJob._id);
-    fullDone = true; await quick;
-    if (run !== pickRun || job !== forJob) return;
-    const r = show(files);
-    setPickStatus(r.hits.length ? (r.hits.length > r.shown.length ? `Showing the first ${r.shown.length} of ${r.hits.length} matches. Type more to narrow it down.` : `${r.hits.length} match${r.hits.length === 1 ? "" : "es"}.`) : "No files found.");
-    if (files.partial) setPickStatus($("pickStatus").textContent + " Some folders could not be read.", r.hits.length ? "" : "err");
-  } catch (e) { if (run === pickRun) setPickStatus(e.message, "err"); }
-}
-async function openPicker() {
-  if (!job) return;
-  const box = $("wbPick");
-  if (!box.hidden) { box.hidden = true; return; }
-  const forJob = job, sel = $("pickFolder");
-  box.hidden = false; $("pickQ").value = "";
-  sel.innerHTML = ""; sel.add(new Option("Loading folders…", "")); sel.disabled = true;
-  setPickStatus("Loading folders…", "busy"); $("pickList").textContent = ""; pickDocs = []; updatePickGo();
-  try {
-    const folders = await folderTree(forJob._id);
-    if (job !== forJob) return;
-    sel.innerHTML = "";
-    for (const f of folders) sel.add(new Option(f.path, f.id));
-    const work = folders.find((f) => f.path.trim().toLowerCase() === "working documents") || folders.find((f) => /(^|\/ )working documents$/i.test(f.path.trim()));
-    sel.value = work ? work.id : "";
-    sel.disabled = false;
-    await loadPickList();
-  } catch (e) { setPickStatus(e.message, "err"); sel.innerHTML = ""; sel.disabled = false; }
-}
 // Which file-storage sites Wunderbuild's signed links point at (host names only, never the link or the file), so the Worker's
 // allowed list (ALLOWED_STORAGE_HOSTS) can be set exactly and a change of storage is easy to see. Kept on this computer.
 const STORAGE_KEY = "wb_storage_hosts";
@@ -992,21 +885,6 @@ async function attachDocs(forJob, items, say) {
   return { done, failed };
 }
 const attachSummary = (r) => `${r.done ? `Attached ${r.done} file${r.done === 1 ? "" : "s"} to your email. ` : ""}${r.failed.length ? `Not attached: ${r.failed.join("; ")}` : ""}`;
-async function attachPicked() {
-  const forJob = job;
-  const rows = [...$("pickList").children];
-  const chosen = rows.map((row, i) => ({ row, cb: row.children[0], d: pickDocs[i] })).filter((x) => x.cb.checked && !x.cb.disabled);
-  if (!forJob || !chosen.length || sending) return;
-  sending = true; lockUI(true); $("pickFolder").disabled = true;
-  let r = { done: 0, failed: [] };
-  try {
-    r = await attachDocs(forJob, chosen.map((x) => ({ d: x.d, ok: () => { x.cb.checked = false; x.cb.disabled = true; x.row.children[1].textContent = `${x.d.name} (attached)`; } })), (m) => setPickStatus(m, "busy"));
-  } finally {
-    sending = false; lockUI(false); $("pickFolder").disabled = false; refreshSend(); updatePickGo();
-    if (pendingRefresh) { pendingRefresh = false; refreshForItem(true); }
-  }
-  setPickStatus(attachSummary(r), r.failed.length ? "err" : "ok");
-}
 
 /* ---------- "Browse files…": a pop-up over the panel to walk through the job's folders ---------- */
 let brRun = 0, brStack = [], brPicked = new Map(), brDone = new Set();
@@ -1066,7 +944,7 @@ async function attachBrowsed() {
   if (!$("browse").hidden) browseLoad().then(() => brSay(attachSummary(r), r.failed.length ? "err" : "ok"));
 }
 $("browseBtn").addEventListener("click", () => { refreshFolders("browse opened"); openBrowse(); });
-$("brClose").addEventListener("click", () => { if (!sending) { const done = brDone.size; closeBrowse(); if (done) setPickStatus(`Attached ${done} file${done === 1 ? "" : "s"} to your email.`, "ok"); } });
+$("brClose").addEventListener("click", () => { if (!sending) { const done = brDone.size; closeBrowse(); if (done) setStatus(`Attached ${done} file${done === 1 ? "" : "s"} to your email.`, "ok"); } });
 $("brBack").addEventListener("click", () => { if (!sending && brStack.length > 1) { brStack.pop(); browseLoad(); } });
 $("brGo").addEventListener("click", attachBrowsed);
 
@@ -1699,7 +1577,7 @@ $("signOut").addEventListener("click", () => {
 let sending = false, pendingRefresh = false;
 function lockUI(on) {
   if (on) $("send").disabled = true;
-  $("q").disabled = on; $("chosen").disabled = on; $("name").disabled = on; $("wbAttachBtn").disabled = on || !job; $("browseBtn").disabled = on || !job; $("brClose").disabled = on; $("brGo").disabled = on || brPicked.size === 0; $("wbClearBtn").disabled = on; $("subjPrefix").disabled = on; $("attMode").disabled = on; $("pickGo").disabled = on;
+  $("q").disabled = on; $("chosen").disabled = on; $("name").disabled = on; $("pcBtn").disabled = on; $("browseBtn").disabled = on || !job; $("brClose").disabled = on; $("brGo").disabled = on || brPicked.size === 0; $("wbClearBtn").disabled = on; $("subjPrefix").disabled = on; $("attMode").disabled = on;
   $("folder").disabled = on || !job; $("attFolder").disabled = on || !job;
   for (const el of $("attList").querySelectorAll("input,select")) el.disabled = on;
   for (const el of $("jobs").querySelectorAll("button")) el.disabled = on;
@@ -2320,17 +2198,33 @@ $("wbClearBtn").addEventListener("click", async () => {
   try {
     const n = await removeAllAttachments();
     setStatus(n ? `Removed ${n} attachment${n === 1 ? "" : "s"} from the email.` : "There were no attachments to remove.", n ? "ok" : "");
-    if (!$("wbPick").hidden) { $("pickQ").value.trim() ? runPickSearch() : loadPickList(); } // lets the files be attached again
   } finally {
     sending = false; lockUI(false); refreshSend();
     if (pendingRefresh) { pendingRefresh = false; refreshForItem(true); }
   }
 });
-$("wbAttachBtn").addEventListener("click", () => { if (!sending) { refreshFolders("attach opened"); openPicker(); } });
-$("pickFolder").addEventListener("change", () => { if (!sending) { $("pickQ").value = ""; loadPickList(); } });
-let pickTimer = null;
-$("pickQ").addEventListener("input", () => { clearTimeout(pickTimer); pickTimer = setTimeout(() => { if (!sending) runPickSearch(); }, 300); });
-$("pickGo").addEventListener("click", attachPicked);
+// Attach from PC: files chosen on this computer are added to the email being written.
+$("pcBtn").addEventListener("click", () => { if (!sending) { $("pcFiles").value = ""; $("pcFiles").click(); } });
+$("pcFiles").addEventListener("change", async () => {
+  const files = [...$("pcFiles").files];
+  if (!files.length || sending) return;
+  sending = true; lockUI(true);
+  let done = 0; const failed = [];
+  try {
+    for (const f of files) {
+      setStatus(`Attaching ${done + failed.length + 1} of ${files.length}: ${f.name}…`, "busy");
+      try {
+        if (f.size > MAX_ATTACH) throw new Error(`too large (${sizeText(f.size)}; the limit is ${sizeText(MAX_ATTACH)})`);
+        await addAttachment(bytesToB64(new Uint8Array(await f.arrayBuffer())), f.name);
+        done++;
+      } catch (e) { failed.push(`${f.name}: ${e.message}`); }
+    }
+  } finally {
+    sending = false; lockUI(false); refreshSend(); $("pcFiles").value = "";
+    if (pendingRefresh) { pendingRefresh = false; refreshForItem(true); }
+  }
+  setStatus(attachSummary({ done, failed }), failed.length ? "err" : "ok");
+});
 $("fmtPdf").addEventListener("change", () => store.set("wb_fmtpdf", $("fmtPdf").checked ? "1" : "0"));
 $("convPdf").addEventListener("change", () => store.set("wb_convpdf", $("convPdf").checked ? "1" : "0"));
 
