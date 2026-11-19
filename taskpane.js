@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.113"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.114"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -870,18 +870,26 @@ function addAttachment(b64, name) {
 }
 // Attaches Wunderbuild files to the email being written, one at a time. items: [{ d, ok() }]. Returns { done, failed }.
 async function attachDocs(forJob, items, say) {
-  const failed = []; let done = 0;
-  for (const x of items) {
-    say(`Attaching ${done + failed.length + 1} of ${items.length}: ${x.d.name}…`);
-    try {
-      if ((x.d.size || 0) > MAX_ATTACH) throw new Error(`too large (${sizeText(x.d.size)}; the limit is ${sizeText(MAX_ATTACH)})`);
-      const info = await api(`/documents/job/${forJob._id}/${x.d._id}/download-url`);
-      const bytes = await fetchBytes(info.url);
-      if (bytes.length > MAX_ATTACH) throw new Error(`too large (${sizeText(bytes.length)})`);
-      await addAttachment(bytesToB64(bytes), info.name || x.d.name);
-      done++; x.ok();
-    } catch (e) { failed.push(`${x.d.name}: ${e.message}`); }
-  }
+  const failed = []; let done = 0, next = 0, shown = 0;
+  // Three files are fetched at a time; Outlook is asked to attach them one at a time, as they arrive.
+  let outlookTurn = Promise.resolve();
+  const worker = async () => {
+    while (next < items.length) {
+      const x = items[next++];
+      say(`Attaching ${++shown} of ${items.length}: ${x.d.name}…`);
+      try {
+        if ((x.d.size || 0) > MAX_ATTACH) throw new Error(`too large (${sizeText(x.d.size)}; the limit is ${sizeText(MAX_ATTACH)})`);
+        const info = await api(`/documents/job/${forJob._id}/${x.d._id}/download-url`);
+        const bytes = await fetchBytes(info.url);
+        if (bytes.length > MAX_ATTACH) throw new Error(`too large (${sizeText(bytes.length)})`);
+        const turn = outlookTurn.then(() => addAttachment(bytesToB64(bytes), info.name || x.d.name));
+        outlookTurn = turn.catch(() => {});
+        await turn;
+        done++; x.ok();
+      } catch (e) { failed.push(`${x.d.name}: ${e.message}`); }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(3, items.length) }, worker));
   return { done, failed };
 }
 const attachSummary = (r) => `${r.done ? `Attached ${r.done} file${r.done === 1 ? "" : "s"} to your email. ` : ""}${r.failed.length ? `Not attached: ${r.failed.join("; ")}` : ""}`;
@@ -1653,9 +1661,11 @@ $("send").addEventListener("click", async () => {
   const forceResave = resaveNext; resaveNext = false; // true only when started by "Resave Email"
   sending = true; lockUI(true); $("send").disabled = true;
   const saveStart = Date.now();
+  let lapT = saveStart; const lap = (what) => { const n = Date.now(); diag("timing", `${what}: ${((n - lapT) / 1000).toFixed(1)} s (${((n - saveStart) / 1000).toFixed(1)} s since the start)`); lapT = n; }; // where a save's time goes, shown in the Troubleshooter
   diag("save", `started (${isCompose() ? "email being written" : "received email"})`);
   let convLock = null; // held while a conversation PDF is being replaced
   let emailLock = null; // held while this one email is being saved
+  let filed = false, attP = null; const attDocs = []; // attachments uploaded early (see startAtts) and whether the rest of the save went through
   try {
     const baseName = cleanName($("name").value).trim().replace(/\.(eml|pdf|msg)$/i, "");
     if (corrMissing && job) { setStatus("Creating Correspondence folder…", "busy"); await createCorrespondence(job); }
@@ -1691,6 +1701,7 @@ $("send").addEventListener("click", async () => {
       throw new Error("You selected a different email while this one was being read, so nothing was saved. Select the email again and press Save.");
     }
     const got = rest.slice(0, reads.length), inl = rest.slice(reads.length);
+    lap("read the email and attachments from Outlook");
     if (useFmt) diag("save", `pictures in the email: ${cidNames.size + customIds.size ? `${Math.max(cidNames.size, customIds.size)} linked to attachments` : "none linked"}; ${snap.attachments.length} attachment(s) listed, ${inlineAtts.length} used as pictures, ${inl.filter(Boolean).length} read`);
     let eml;
     if (snap.compose) {
@@ -1727,6 +1738,7 @@ $("send").addEventListener("click", async () => {
       try { setStatus("Checking for an existing copy…", "busy"); existing = await findExisting(jobAtSend, folderId, id); }
       catch (e) { problems.push(`could not check for an existing copy (${e.message})`); }
     }
+    lap("locks and already-saved check");
     const oldPdf = existing.filter(isPdfDoc), oldEml = existing.filter(isEmlDoc);
     const replace = snap.compose || forceResave; // a draft is saved afresh each time, so the saved copy always matches what is sent
     const needPdf = replace || !(oldPdf.length || oldEml.length), needEml = replace || !oldEml.length; // the PDF has a clean name, so a saved .eml means its PDF is saved too; // a received email only fills in what is missing
@@ -1746,15 +1758,34 @@ $("send").addEventListener("click", async () => {
     let pdfName = uniquePdfName(nameDocs);
 
     let pdf = null, convOld = null, convUsed = false, convKeys = [];
+    // Ticked attachments are uploaded three at a time in the background while the PDF is being drawn. If the rest of the save fails they are taken back.
+    let savedAtts = 0; const attResult = new Array(got.length);
+    const startAtts = () => {
+      if (attP) return;
+      let nextAtt = 0;
+      const attWorker = async () => {
+        while (nextAtt < got.length) {
+          const i = nextAtt++, r = got[i];
+          if (!r.f) { attResult[i] = `${r.att.name}: ${r.e.message}`; continue; }
+          try {
+            const d = await uploadFile(finalName(r.typed, r.f.name), r.f.type, r.f.bytes, perFile ? r.folder : attFolderId, jobAtSend._id);
+            attDocs.push({ j: jobAtSend._id, d: d && d._id, cb: r.cb }); savedAtts++; r.cb.checked = false; // done: no need to save it again
+          } catch (e) { attResult[i] = `${r.att.name}: ${e.message}`; }
+        }
+      };
+      if (got.length) setStatus(`Saving ${got.length} attachment${got.length === 1 ? "" : "s"} while the PDF is made…`, "busy");
+      attP = Promise.all(Array.from({ length: Math.min(3, got.length) }, attWorker));
+    };
     const emlName = `${fileBase}.eml`;
     let outlookFolderId = null; // known early, so the conversation PDF can link to the saved original email
     if (convOn && needPdf && needEml) { try { outlookFolderId = await ensureOutlookFolder(folderId, jobAtSend._id); } catch { /* tried again when the original email is saved */ } }
     const fixName = async () => { // Wunderbuild adds " (1)" when a name is already taken: once the earlier copy is gone the new PDF takes its name
       if (!pdfDoc || !pdfDoc._id) return;
       try {
-        const cur = await api(`/documents/job/${jobAtSend._id}/${pdfDoc._id}`);
-        if (cur && cur.name && cur.name !== pdfName) await api(`/documents/job/${jobAtSend._id}/${pdfDoc._id}`, { method: "PUT", body: JSON.stringify({ name: pdfName }) });
-      } catch (e) { problems.push(`the PDF could not be renamed to ${pdfName} (${e.message})`); }
+        let curName = pdfDoc.name; // the answer to the upload request already names the file: no need to ask again (one Wunderbuild wait saved)
+        if (typeof curName !== "string") { const cur = await api(`/documents/job/${jobAtSend._id}/${pdfDoc._id}`); curName = cur && cur.name; }
+        if (curName && curName !== pdfName) await api(`/documents/job/${jobAtSend._id}/${pdfDoc._id}`, { method: "PUT", body: JSON.stringify({ name: pdfName }) });
+      } catch (e) { notes.push(`the PDF could not be renamed to ${pdfName} (${e.message})`); } // the file is saved; only its name differs, so this is a note and not a problem
     };
     if (convOn && needPdf) {
       convLock = await acquireConvLock(`${jobAtSend._id}:${hash40(window.WBThread ? window.WBThread.subjectKey(subject) : String(subject))}`); // throws if someone else is updating it
@@ -1762,6 +1793,7 @@ $("send").addEventListener("click", async () => {
         try { setStatus("Checking the folder again…", "busy"); nameDocs = await listDocs(jobAtSend._id, folderId); pdfName = uniquePdfName(nameDocs); }
         catch (e) { diag("save", `folder not re-read after the lock: ${e.message}`); }
       }
+      startAtts();
       try {
         setStatus("Adding this email to its conversation PDF…", "busy");
         const r = await buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId: jobAtSend._id, docs: nameDocs, outlookFolderId, emlName, topLink: wbLink(jobAtSend._id, folderId), exactPics, emlBytes: snap.compose ? null : eml });
@@ -1773,6 +1805,7 @@ $("send").addEventListener("click", async () => {
         notes.push("this email was saved on its own, not added to its conversation PDF, so it may show as a separate PDF (reason: " + String((e && e.message) || "unknown").replace(/\.$/, "").slice(0, 120) + ")");
       }
     }
+    startAtts();
     if (useFmt && needPdf && !pdf) {
       try {
         setStatus("Rendering formatted PDF…", "busy");
@@ -1780,6 +1813,7 @@ $("send").addEventListener("click", async () => {
         if (!pdf) pdf = await renderPdf(buildEmailHtml({ subject, meta, bodyHtml, cid: buildCidMap(bodyHtml, inl, (m) => diag("pictures", m), exactPics) }));
       } catch (e) { notes.push(`the formatted PDF was not available (${e.message}), so a basic text PDF was saved instead`); } // a note, not a problem: it must not stop a draft from being sent
     }
+    lap("conversation PDF read and drawn");
     let newPdfOk = false, newEmlOk = false, emlDoc = null, pdfDoc = null;
     // The PDF and the original email are saved together; a failed PDF stops everything, a failed original email is only reported.
     const pdfJob = needPdf ? (async () => {
@@ -1796,6 +1830,7 @@ $("send").addEventListener("click", async () => {
     })() : Promise.resolve();
     if (needPdf || needEml) setStatus(`Saving ${needPdf && needEml ? "PDF and original email" : needPdf ? "PDF" : "original email"}…`, "busy");
     const [pdfDone] = await Promise.allSettled([pdfJob, emlJob]);
+    lap("PDF and original email uploaded");
     if (pdfDone.status === "rejected") { // nothing half-saved: take back the original email that was saved alongside
       if (emlDoc) await removeOrJot(jobAtSend._id, emlDoc._id);
       throw pdfDone.reason;
@@ -1806,37 +1841,27 @@ $("send").addEventListener("click", async () => {
     }
     if (convUsed && newPdfOk && pdfDoc) rememberConvPdf(convKeys, jobAtSend._id, pdfDoc._id);
     if (convOld && newPdfOk && (!needEml || newEmlOk)) { // the updated conversation PDF is in, so the earlier version of it goes
-      try { await api(`/documents/job/${jobAtSend._id}/${convOld._id}`, { method: "DELETE" }); }
-      catch (e) { if (!/404/.test(String(e && e.message))) problems.push(`the earlier conversation PDF could not be removed (${e.message})`); }
+      const gone = await removeOrJot(jobAtSend._id, convOld._id); // a failure is remembered and retried at the next save to this job
+      if (!gone) notes.push("the earlier version of the conversation PDF could not be removed just now; it will be removed at the next save");
       await fixName(); // the earlier PDF is gone, so the name is free again
     }
     releaseConvLock(convLock); convLock = null; // the conversation PDF is final: let the next person in
     if (replace) { // the new copies are in, so the earlier copies of this draft can go
-      try {
-        const gone = (e) => { if (!/404/.test(String(e && e.message))) throw e; }; // already removed by hand is fine
-        for (const d of newPdfOk ? oldPdf : []) await api(`/documents/job/${jobAtSend._id}/${d._id}`, { method: "DELETE" }).catch(gone);
-        if (newPdfOk && priorPdf && !oldPdf.some((d) => d._id === priorPdf)) await api(`/documents/job/${jobAtSend._id}/${priorPdf}`, { method: "DELETE" }).catch(gone);
-        for (const d of newEmlOk ? oldEml : []) await api(`/documents/job/${jobAtSend._id}/${d._id}`, { method: "DELETE" }).catch(gone);
-      } catch (e) { problems.push(`the earlier saved copy could not be removed (${e.message})`); }
+      { // the earlier copies of a draft go; one that cannot be removed now is remembered and removed at the next save (a note, not a problem: the new copies are saved)
+        let left = 0;
+        for (const d of newPdfOk ? oldPdf : []) if (!(await removeOrJot(jobAtSend._id, d._id))) left++;
+        if (newPdfOk && priorPdf && !oldPdf.some((d) => d._id === priorPdf)) if (!(await removeOrJot(jobAtSend._id, priorPdf))) left++;
+        for (const d of newEmlOk ? oldEml : []) if (!(await removeOrJot(jobAtSend._id, d._id))) left++;
+        if (left) notes.push(`${left} earlier saved cop${left === 1 ? "y" : "ies"} could not be removed just now; ${left === 1 ? "it" : "they"} will be removed at the next save`);
+      }
       if (newPdfOk && (priorPdf || oldPdf.length)) await fixName();
     }
 
-    // Attachments: three at a time, reported in their original order.
-    let savedAtts = 0, started = 0;
-    const attResult = new Array(got.length);
-    let nextAtt = 0;
-    const attWorker = async () => {
-      while (nextAtt < got.length) {
-        const i = nextAtt++, r = got[i];
-        if (!r.f) { attResult[i] = `${r.att.name}: ${r.e.message}`; continue; }
-        try {
-          setStatus(`Saving attachment ${++started} of ${atts.length}…`, "busy");
-          await uploadFile(finalName(r.typed, r.f.name), r.f.type, r.f.bytes, perFile ? r.folder : attFolderId, jobAtSend._id);
-          savedAtts++; r.cb.checked = false; // done: no need to save it again
-        } catch (e) { attResult[i] = `${r.att.name}: ${e.message}`; }
-      }
-    };
-    await Promise.all(Array.from({ length: Math.min(3, got.length) }, attWorker));
+    // Attachments were started earlier (while the PDF was being drawn); here they are waited for. Reported in their original order.
+    startAtts();
+    await attP;
+    filed = true;
+    lap("clean-up and attachments finished");
     for (const m of attResult) if (m) problems.push(m);
 
     // Remember which job this conversation was filed to (kept on this computer only).
@@ -1878,6 +1903,10 @@ $("send").addEventListener("click", async () => {
     lastResult = { msg, kind: problems.length ? "err" : "ok", subject: snap.subject };
     setStatus(msg, lastResult.kind);
   } catch (e) {
+    if (attP && !filed) { // the PDF or original email failed: the attachments saved ahead of them are taken back, so a retry does not save them twice
+      try { await attP; } catch { /* ignore */ }
+      for (const x of attDocs) { if (x.d) await removeOrJot(x.j, x.d); x.cb.checked = true; }
+    }
     lastResult = { msg: e.message, kind: "err", subject: "" };
     setStatus(e.message, "err");
   } finally {
