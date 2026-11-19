@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.112"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.113"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://api.wunderbuild.com/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -1605,7 +1605,7 @@ $("signOut").addEventListener("click", () => {
 let sending = false, pendingRefresh = false;
 function lockUI(on) {
   if (on) $("send").disabled = true;
-  $("q").disabled = on; $("chosen").disabled = on; $("name").disabled = on; $("pcBtn").disabled = on; $("compBtn").disabled = on; $("browseBtn").disabled = on || !job; $("brClose").disabled = on; $("brGo").disabled = on || brPicked.size === 0; $("wbClearBtn").disabled = on; $("subjPrefix").disabled = on; $("attMode").disabled = on;
+  $("q").disabled = on; $("chosen").disabled = on; $("name").disabled = on; $("pcBtn").disabled = on; $("browseBtn").disabled = on || !job; $("brClose").disabled = on; $("brGo").disabled = on || brPicked.size === 0; $("wbClearBtn").disabled = on; $("subjPrefix").disabled = on; $("attMode").disabled = on;
   $("folder").disabled = on || !job; $("attFolder").disabled = on || !job;
   for (const el of $("attList").querySelectorAll("input,select")) el.disabled = on;
   for (const el of $("jobs").querySelectorAll("button")) el.disabled = on;
@@ -2255,60 +2255,6 @@ $("pcFiles").addEventListener("change", async () => {
     if (pendingRefresh) { pendingRefresh = false; refreshForItem(true); }
   }
   setStatus(attachSummary({ done, failed }), failed.length ? "err" : "ok");
-});
-// Compress Attachments: pictures (JPG and PNG) on the email being written are scaled down (longest side 2000 px) and saved again smaller.
-// Other files (PDF, DWG and so on) are left as they are. A picture is only replaced when the new one is clearly smaller.
-async function compressPicture(f) {
-  if (!/^image\/(png|jpe?g)$/i.test(f.type)) return null;
-  const url = URL.createObjectURL(new Blob([f.bytes], { type: f.type }));
-  let img;
-  try { img = await new Promise((ok, no) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => no(new Error("unreadable picture")); i.src = url; }); } finally { URL.revokeObjectURL(url); }
-  const w0 = img.naturalWidth || img.width, h0 = img.naturalHeight || img.height;
-  if (!w0 || !h0) return null;
-  const k = Math.min(1, 2000 / Math.max(w0, h0)), c = document.createElement("canvas");
-  c.width = Math.max(1, Math.round(w0 * k)); c.height = Math.max(1, Math.round(h0 * k));
-  const cx = c.getContext("2d");
-  let png = false;
-  if (/png/i.test(f.type)) { // a PNG with see-through parts stays a PNG (a JPEG would turn them black or white)
-    cx.drawImage(img, 0, 0, c.width, c.height);
-    try { const d = cx.getImageData(0, 0, c.width, c.height).data; for (let i = 3; i < d.length; i += 4) if (d[i] < 250) { png = true; break; } } catch { png = true; }
-  }
-  if (!png) { cx.clearRect(0, 0, c.width, c.height); cx.fillStyle = "#fff"; cx.fillRect(0, 0, c.width, c.height); cx.drawImage(img, 0, 0, c.width, c.height); }
-  const blob = await new Promise((ok) => (png ? c.toBlob(ok, "image/png") : c.toBlob(ok, "image/jpeg", 0.82)));
-  if (!blob) return null;
-  const bytes = new Uint8Array(await blob.arrayBuffer());
-  if (bytes.length > f.bytes.length * 0.9) return null; // not worth replacing
-  const name = png ? f.name : f.name.replace(/\.(png|jpe?g)$/i, "") + ".jpg";
-  return { name, bytes };
-}
-$("compBtn").addEventListener("click", async () => {
-  if (sending) return;
-  sending = true; lockUI(true);
-  let before = 0, after = 0, done = 0, left = 0; const failed = [];
-  try {
-    const it = Office.context.mailbox.item;
-    const atts = (await asyncVal((cb) => it.getAttachmentsAsync(cb)) || []).filter((a) => !a.isInline);
-    if (!atts.length) { setStatus("There are no attachments to compress.", ""); return; }
-    for (const a of atts) {
-      const isPic = /^image\/(png|jpe?g)$/i.test(attType(a)) && (a.size || 0) >= 300 * 1024;
-      if (!isPic) { left++; continue; }
-      setStatus(`Compressing ${done + failed.length + 1}: ${a.name}…`, "busy");
-      try {
-        const f = await getAttachment(a), r = await compressPicture(f);
-        if (!r) { left++; continue; }
-        await new Promise((resolve, reject) => it.removeAttachmentAsync(a.id, (x) => (x.status === Office.AsyncResultStatus.Succeeded ? resolve() : reject(new Error("Outlook would not remove the original")))));
-        attCache.delete(a.id);
-        await addAttachment(bytesToB64(r.bytes), r.name);
-        before += f.bytes.length; after += r.bytes.length; done++;
-      } catch (e) { failed.push(`${a.name}: ${e.message}`); }
-    }
-    const mb = (n) => (n / 1048576).toFixed(1) + " MB";
-    setStatus(`${done ? `Compressed ${done} picture${done === 1 ? "" : "s"}: ${mb(before)} down to ${mb(after)}. ` : "No pictures needed compressing. "}${left ? `${left} other attachment${left === 1 ? " was" : "s were"} left as ${left === 1 ? "it was" : "they were"} (only large JPG and PNG pictures are compressed). ` : ""}${failed.length ? `Not compressed: ${failed.join("; ")}` : ""}`, failed.length ? "err" : "ok");
-  } catch (e) { setStatus(`Could not compress: ${e.message}`, "err"); }
-  finally {
-    sending = false; lockUI(false); refreshSend();
-    if (pendingRefresh) { pendingRefresh = false; refreshForItem(true); }
-  }
 });
 $("fmtPdf").addEventListener("change", () => store.set("wb_fmtpdf", $("fmtPdf").checked ? "1" : "0"));
 $("convPdf").addEventListener("change", () => store.set("wb_convpdf", $("convPdf").checked ? "1" : "0"));
