@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.127"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.128"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://wb-proxy.tallwood.workers.dev/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -1058,11 +1058,24 @@ $("brNewGo").addEventListener("click", createFolderHere);
 $("brNewName").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); createFolderHere(); } });
 
 // The "Save Attachments to" button shows the chosen folder; the hidden list below it keeps the choice.
+// Shows the end of a long folder path (the part that tells folders apart): leading folders are dropped for ".../" until it fits.
+function fitPickBtn(b, path) {
+  b.dataset.path = path; b.title = path;
+  const segs = path.split(" / "); let i = 0;
+  const set = () => { b.textContent = `📁 ${i ? ".../ " : ""}${segs.slice(i).join(" / ")}`; };
+  set();
+  if (!b.offsetWidth) return; // hidden: refitted when shown
+  while (i < segs.length - 1 && b.scrollWidth > b.clientWidth) { i++; set(); }
+}
+function refitPicks() { for (const b of document.querySelectorAll("#attPick,.fpick")) if (b.dataset.path && b.offsetWidth) fitPickBtn(b, b.dataset.path); }
+window.addEventListener("resize", refitPicks);
 function pickLabel(sel) { const o = sel.selectedOptions && sel.selectedOptions[0]; return o ? o.text : "Job documents (top level)"; }
 function syncAttPick() {
   const af = $("attFolder"), b = $("attPick");
   b.disabled = af.disabled || !job;
-  b.textContent = !job ? "Choose a job first" : af.options.length === 0 ? "Loading folders…" : `📁 ${pickLabel(af)}`;
+  if (!job) b.textContent = "Choose a job first";
+  else if (af.options.length === 0) b.textContent = "Loading folders…";
+  else fitPickBtn(b, pickLabel(af));
 }
 function setFolderChoice(sel, id, path) {
   const af = $("attFolder");
@@ -1564,7 +1577,7 @@ function fillAttRowSelects() {
     sel.value = keep !== null && [...sel.options].some((o) => o.value === keep) ? keep : src.value;
     sel.disabled = src.disabled;
     const b = row.querySelector(".fpick");
-    if (b) { b.textContent = `📁 ${pickLabel(sel)}`; b.disabled = sel.disabled; }
+    if (b) { fitPickBtn(b, pickLabel(sel)); b.disabled = sel.disabled; }
   }
   syncAttPick();
 }
@@ -1573,6 +1586,7 @@ function syncAttMode() {
   $("swOne").classList.toggle("on", !each); $("swEach").classList.toggle("on", each);
   $("attPick").hidden = each; $("attFolderLabel").hidden = each; // the list itself stays hidden: it only holds the choice
   for (const row of $("attList").children) { const b = row.querySelector(".fpick"); if (b) b.hidden = !each; }
+  refitPicks();
 }
 // Rows are in the same order as currentAtts: [checkbox, name box, size].
 function selectedAttachments() {
