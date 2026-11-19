@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.120"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.121"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://wb-proxy.tallwood.workers.dev/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -1281,7 +1281,7 @@ async function listDocs(jobId, folderId, low) {
 
 // One call for a whole folder when the dev test on this computer showed Wunderbuild's folder detail to be complete; otherwise the normal paged listing.
 async function listFolderDocs(jobId, folderId, low) {
-  if (folderId && store.get("wb_folderdocs") === "1") {
+  if (folderId && store.get("wb_folderdocs") !== "0") { // on for everyone since the 19 Nov test (108 of 108 files returned, past the 100 page size); a failed test on a PC turns it off there
     try { const d = await api(`/documents/job/${jobId}/folders/${folderId}`, low ? { low: true } : {}); if (Array.isArray(d.documents)) return d.documents.filter((x) => !x.isDeleted); } catch { /* the normal listing follows */ }
   }
   return listDocs(jobId, folderId, low);
