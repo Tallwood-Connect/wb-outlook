@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.118"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.119"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://wb-proxy.tallwood.workers.dev/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -2354,6 +2354,50 @@ $("wbTests").addEventListener("click", async () => {
   }
 });
 
+// Dev-only: fills a job's Outlook Files folder with tiny dummy files so the folder-detail test has more than 100 files to look at, and takes them out again.
+// Only use it on a job made for testing. Two requests at a time, so it is gentle on Wunderbuild's limit.
+const FILL_PREFIX = "wb-addin-dummy ";
+async function inPool(items, n, fn) { let i = 0; await Promise.all(Array.from({ length: n }, async () => { while (i < items.length) { const k = i++; await fn(items[k], k); } })); }
+$("wbFill").addEventListener("click", async () => {
+  const out = $("wbTestsOut"), say = (m) => { out.textContent += m + "\n"; diag("test", m); };
+  out.textContent = "";
+  if (!job) { out.textContent = "Choose the test job first."; return; }
+  if (sending) return;
+  say(`Job: ${job.name}. Only use this on a job made for testing.`);
+  sending = true; lockUI(true); $("wbFill").disabled = $("wbUnfill").disabled = $("wbTests").disabled = true;
+  const jobId = job._id; let made = 0, failed = 0;
+  try {
+    if (corrMissing) { say("Creating the Correspondence folder…"); await createCorrespondence(job); }
+    const ofId = await ensureOutlookFolder($("folder").value, jobId);
+    const have = new Set((await listDocs(jobId, ofId, true)).map((d) => d.name));
+    const names = Array.from({ length: 110 }, (_, i) => `${FILL_PREFIX}${String(i + 1).padStart(3, "0")} (delete me).txt`).filter((n) => !have.has(n));
+    say(`${110 - names.length} already there; making ${names.length} more…`);
+    await inPool(names, 2, async (n, k) => {
+      try { await uploadFile(n, "text/plain", new TextEncoder().encode(`dummy file for testing ${n}`), ofId, jobId); made++; }
+      catch (e) { failed++; if (failed <= 3) say(`  ${n}: ${e.message}`); }
+      if ((made + failed) % 10 === 0) setStatus(`Making dummy files: ${made + failed} of ${names.length}…`, "busy");
+    });
+    say(`Done: ${made} made, ${failed} failed. Now run the Wunderbuild Tests on this job.`);
+  } catch (e) { say(`Stopped: ${e.message}`); }
+  finally { sending = false; lockUI(false); $("wbFill").disabled = $("wbUnfill").disabled = $("wbTests").disabled = false; refreshSend(); }
+});
+$("wbUnfill").addEventListener("click", async () => {
+  const out = $("wbTestsOut"), say = (m) => { out.textContent += m + "\n"; diag("test", m); };
+  out.textContent = "";
+  if (!job) { out.textContent = "Choose the test job first."; return; }
+  if (sending) return;
+  sending = true; lockUI(true); $("wbFill").disabled = $("wbUnfill").disabled = $("wbTests").disabled = true;
+  const jobId = job._id; let gone = 0, left = 0;
+  try {
+    const ofId = await ensureOutlookFolder($("folder").value, jobId);
+    const mine = (await listDocs(jobId, ofId, true)).filter((d) => String(d.name || "").startsWith(FILL_PREFIX));
+    say(`Removing ${mine.length} dummy files…`);
+    await inPool(mine, 2, async (d) => { if (await removeOrJot(jobId, d._id)) gone++; else left++; });
+    say(`Done: ${gone} removed${left ? `, ${left} could not be removed just now (they will be removed at the next save to this job)` : ""}.`);
+  } catch (e) { say(`Stopped: ${e.message}`); }
+  finally { sending = false; lockUI(false); $("wbFill").disabled = $("wbUnfill").disabled = $("wbTests").disabled = false; refreshSend(); }
+});
+
 /* ---------- init ---------- */
 $("name").addEventListener("input", () => { nameEdited = true; refreshSend(); });
 // The automatic handler (launchevent.js) fills in emails from Publish to Wunderbuild; it reads these settings,
@@ -2547,7 +2591,7 @@ Office.onReady(async () => {
   loadPrefs();
   if (!$("key").value) $("settings").open = true;
   else syncRoamingApi();
-  $("wbTests").hidden = !/\/dev\//.test(location.pathname); // the two Wunderbuild tests are for the dev copy only
+  $("wbTests").hidden = $("wbFill").hidden = $("wbUnfill").hidden = !/\/dev\//.test(location.pathname); // the Wunderbuild tests and the dummy-file buttons are for the dev copy only
   applyMode();
   // The pane stays open while other items are selected, and the same pane can show a received email or an email
   // being written (e.g. an inline reply), so the mode is re-checked every time the item changes.
