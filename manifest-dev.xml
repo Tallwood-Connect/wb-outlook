@@ -5,7 +5,7 @@
   xmlns:mailappor="http://schemas.microsoft.com/office/mailappversionoverrides/1.0"
   xsi:type="MailApp">
   <Id>cdd5c9a9-9c65-41ff-a67b-b189ee287ff1</Id>
-  <Version>1.0.0.6</Version>
+  <Version>1.0.0.7</Version>
   <ProviderName>Tallwood</ProviderName>
   <DefaultLocale>en-AU</DefaultLocale>
   <DisplayName DefaultValue="Send to Wunderbuild (dev)"/>
@@ -63,7 +63,6 @@
                     <Action xsi:type="ShowTaskpane">
                       <SourceLocation resid="Taskpane.Url"/>
                       <SupportsPinning>true</SupportsPinning>
-                      <SupportsMultiSelect>true</SupportsMultiSelect>
                     </Action>
                   </Control>
                 </Group>
@@ -111,8 +110,8 @@
           <bt:String id="Compose.Label" DefaultValue="Save and send (dev)"/>
         </bt:ShortStrings>
         <bt:LongStrings>
-          <bt:String id="Button.Tip" DefaultValue="Upload this email to a Wunderbuild job. Dev manifest 1.0.0.6"/>
-          <bt:String id="Compose.Tip" DefaultValue="Save this email to a Wunderbuild job, then send it. Dev manifest 1.0.0.6"/>
+          <bt:String id="Button.Tip" DefaultValue="Upload this email to a Wunderbuild job. Dev manifest 1.0.0.7"/>
+          <bt:String id="Compose.Tip" DefaultValue="Save this email to a Wunderbuild job, then send it. Dev manifest 1.0.0.7"/>
         </bt:LongStrings>
       </Resources>
     </VersionOverrides>
