@@ -127,8 +127,8 @@
           <bt:String id="Compose.Label" DefaultValue="Save and send"/>
         </bt:ShortStrings>
         <bt:LongStrings>
-          <bt:String id="Button.Tip" DefaultValue="Upload this email to a Wunderbuild job."/>
-          <bt:String id="Compose.Tip" DefaultValue="Save this email to a Wunderbuild job, then send it."/>
+          <bt:String id="Button.Tip" DefaultValue="Upload this email to a Wunderbuild job. Manifest 1.0.0.19"/>
+          <bt:String id="Compose.Tip" DefaultValue="Save this email to a Wunderbuild job, then send it. Manifest 1.0.0.19"/>
         </bt:LongStrings>
       </Resources>
     </VersionOverrides>

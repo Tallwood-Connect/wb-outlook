@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.117"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.118"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://wb-proxy.tallwood.workers.dev/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -2530,9 +2530,11 @@ function applyMode() {
   if (compose) startSubjectWatch();
 }
 
+// The newest manifest in this repo (manifest.xml, or manifest-dev.xml on the dev copy). The installed one is shown in the button's hover text; tests/manifestver.test.js keeps this in step with the files.
+const MANIFEST_VERSION = /\/dev\//.test(location.pathname) ? "1.0.0.6" : "1.0.0.19";
 Office.onReady(async () => {
   const ver = $("ver");
-  ver.textContent = `v${APP_VERSION}` + (ver.dataset.v === APP_VERSION ? "" : ` (taskpane.html is v${ver.dataset.v}, files out of sync)`);
+  ver.textContent = `v${APP_VERSION} · ${/\/dev\//.test(location.pathname) ? "dev manifest" : "latest manifest"} ${MANIFEST_VERSION}` + (ver.dataset.v === APP_VERSION ? "" : ` (taskpane.html is v${ver.dataset.v}, files out of sync)`);
   purge((k) => k === "wb_job" || k === "wb_jobs_v1" || k.startsWith("wb_folder_")); // leftovers from older versions
   pruneConv();
   $("key").value = store.get("wb_key") || "";
