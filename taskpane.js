@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.123"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.124"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://wb-proxy.tallwood.workers.dev/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -1589,6 +1589,26 @@ async function sweepOrphans(jobId) {
 }
 
 /* ---------- upload ---------- */
+// Wunderbuild's storage site refuses uploads straight from Outlook (CORS), so every file ended up going through the Worker after a wasted direct try.
+// Once a site has refused, the direct try is skipped for a week; big uploads are timed in the Troubleshooter.
+const WORKER_ONLY_KEY = "wb_workerhosts";
+const hostOf = (u) => { try { return new URL(u).host; } catch { return ""; } };
+function directRefused(host) { try { const m = JSON.parse(store.get(WORKER_ONLY_KEY) || "{}"); return !!m[host] && Date.now() - m[host] < 7 * 864e5; } catch { return false; } }
+function markDirectRefused(host) { try { const m = JSON.parse(store.get(WORKER_ONLY_KEY) || "{}"); m[host] = Date.now(); store.set(WORKER_ONLY_KEY, JSON.stringify(m)); } catch { /* storage unavailable */ } }
+async function sendToStorage(uploadUrl, type, blob, name) {
+  const host = hostOf(uploadUrl), t0 = Date.now();
+  let put, upVia = "direct", directMs = 0;
+  if (host && !directRefused(host)) {
+    try { put = await fetch(uploadUrl, { method: "PUT", headers: { "Content-Type": type }, body: blob }); }
+    catch { directMs = Date.now() - t0; markDirectRefused(host); upVia = "Worker"; } // the storage site blocked the browser
+  } else upVia = "Worker";
+  if (upVia === "Worker") {
+    put = await fetch(base().replace(/\/api$/, "") + "/upload", { method: "PUT", headers: { "x-api-key": $("key").value.trim(), "x-upload-url": uploadUrl, "Content-Type": type }, body: blob });
+  }
+  const ms = Date.now() - t0;
+  if (blob.size > 1048576 || directMs > 1000) diag("upload", `${name}: ${(blob.size / 1048576).toFixed(1)} MB sent ${upVia === "Worker" ? "through the Worker" : "directly"} in ${(ms / 1000).toFixed(1)} s (${(blob.size / 1048576 / Math.max(ms / 1000, 0.001)).toFixed(2)} MB/s)${directMs ? `; the direct try failed after ${directMs} ms` : ""}`);
+  return { put, upVia };
+}
 async function uploadFile(name, type, bytes, folderId, jobId = job._id) {
   let docId = null;
   try {
@@ -1598,19 +1618,7 @@ async function uploadFile(name, type, bytes, folderId, jobId = job._id) {
     });
     docId = doc._id;
     if (!doc.uploadUrl) throw new Error("Wunderbuild did not return an upload URL.");
-    const blob = new Blob([bytes], { type });
-    let put, upVia = "direct";
-    try {
-      put = await fetch(doc.uploadUrl, { method: "PUT", headers: { "Content-Type": type }, body: blob });
-    } catch {
-      // Storage blocked the browser (CORS): send the file through the proxy instead.
-      upVia = "Worker";
-      put = await fetch(base().replace(/\/api$/, "") + "/upload", {
-        method: "PUT",
-        headers: { "x-api-key": $("key").value.trim(), "x-upload-url": doc.uploadUrl, "Content-Type": type },
-        body: blob,
-      });
-    }
+    const { put, upVia } = await sendToStorage(doc.uploadUrl, type, new Blob([bytes], { type }), name);
     noteStorageHost(doc.uploadUrl, upVia);
     if (!put.ok) { let why = ""; try { why = (await put.clone().text()).replace(/\s+/g, " ").slice(0, 200); } catch { /* no body */ } diag("upload", `${name}: ${bytes.length} bytes sent ${upVia === "Worker" ? "through the Worker" : "directly"}, answer ${put.status} ${why}`); }
     if (!put.ok) throw upVia === "Worker" ? await proxyFileError(put, `Saving ${name}`, (st) => `Upload of ${name} failed (${st}).`) : new Error(`Upload of ${name} failed (${put.status}).`);
@@ -1623,10 +1631,7 @@ async function uploadFile(name, type, bytes, folderId, jobId = job._id) {
 
 // Sends bytes to a signed storage address (straight from Outlook, or through the Worker when the storage site refuses the browser).
 async function storagePut(uploadUrl, type, bytes, name) {
-  const blob = new Blob([bytes], { type });
-  let put, upVia = "direct";
-  try { put = await fetch(uploadUrl, { method: "PUT", headers: { "Content-Type": type }, body: blob }); }
-  catch { upVia = "Worker"; put = await fetch(base().replace(/\/api$/, "") + "/upload", { method: "PUT", headers: { "x-api-key": $("key").value.trim(), "x-upload-url": uploadUrl, "Content-Type": type }, body: blob }); }
+  const { put, upVia } = await sendToStorage(uploadUrl, type, new Blob([bytes], { type }), name);
   noteStorageHost(uploadUrl, upVia);
   if (!put.ok) throw upVia === "Worker" ? await proxyFileError(put, `Saving ${name}`, (st) => `Upload of ${name} failed (${st}).`) : new Error(`Upload of ${name} failed (${put.status}).`);
 }
