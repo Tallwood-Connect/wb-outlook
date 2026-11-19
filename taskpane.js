@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.121"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.122"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://wb-proxy.tallwood.workers.dev/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -2498,10 +2498,15 @@ let multiSel = [];
 const multiSupported = () => { try { return Office.context.requirements.isSetSupported("Mailbox", "1.15") && typeof Office.context.mailbox.getSelectedItemsAsync === "function"; } catch { return false; } };
 function refreshMultiButton() { $("multiSave").disabled = !(job && multiSel.length && !foldersFailed && !foldersPending) || sending; }
 async function refreshMulti() {
-  let items = [];
-  if (multiSupported()) {
-    try { items = await new Promise((res) => Office.context.mailbox.getSelectedItemsAsync((r) => res(r.status === Office.AsyncResultStatus.Succeeded && Array.isArray(r.value) ? r.value : []))); } catch { items = []; }
+  let items = [], why = "";
+  const sup = multiSupported();
+  if (sup) {
+    try { items = await new Promise((res) => Office.context.mailbox.getSelectedItemsAsync((r) => { if (r.status === Office.AsyncResultStatus.Succeeded && Array.isArray(r.value)) res(r.value); else { why = (r.error && (r.error.message || r.error.code)) || "no list returned"; res([]); } })); } catch (e) { why = e.message; items = []; }
+  } else {
+    let has15 = "?", fn = "?"; try { has15 = Office.context.requirements.isSetSupported("Mailbox", "1.15"); fn = typeof Office.context.mailbox.getSelectedItemsAsync; } catch (e) { has15 = e.message; }
+    why = `Mailbox 1.15 supported: ${has15}; getSelectedItemsAsync is ${fn}`;
   }
+  diag("multi", `selection check: supported=${sup}, emails selected=${items.length}${why ? `, reason: ${why}` : ""}${items.length ? `, first has: ${Object.keys(items[0]).join(",")}` : ""}`);
   multiSel = items.length > 1 ? items : [];
   $("multi").hidden = !multiSel.length;
   if (multiSel.length) {
@@ -2592,12 +2597,12 @@ Office.onReady(async () => {
   if (!$("key").value) $("settings").open = true;
   else syncRoamingApi();
   $("wbTests").hidden = $("wbFill").hidden = $("wbUnfill").hidden = !/\/dev\//.test(location.pathname); // the Wunderbuild tests and the dummy-file buttons are for the dev copy only
-  applyMode();
+  await refreshMulti().catch((e) => diag("multi", `selection check failed: ${e.message}`)); // first: several emails selected means there is no single open email to inspect
+  try { applyMode(); } catch (e) { diag("multi", `panel mode could not be set (${e.message}); this is normal while several emails are selected`); }
   // The pane stays open while other items are selected, and the same pane can show a received email or an email
   // being written (e.g. an inline reply), so the mode is re-checked every time the item changes.
-  Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { applyMode(); refreshMulti(); if (sending) { pendingRefresh = true; return; } refreshForItem(false); });
+  Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => { refreshMulti().catch(() => {}); try { applyMode(); } catch (e) { diag("multi", `panel mode could not be set (${e.message})`); } if (sending) { pendingRefresh = true; return; } refreshForItem(false); });
   if (multiSupported()) { try { Office.context.mailbox.addHandlerAsync(Office.EventType.SelectedItemsChanged, () => { refreshMulti(); if (!sending && !Office.context.mailbox.item) refreshForItem(false); }); } catch { /* not available in this Outlook */ } }
-  refreshMulti();
   await refreshForItem(false);
   // Once the panel is up and quiet, the PDF tools are fetched in the background so saving does not wait for them.
   if ($("fmtPdf").checked) setTimeout(() => { (($("convPdf").checked) ? loadConvTools() : loadThreadTool()).catch(() => {}); }, 2500);
