@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.125"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.126"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://wb-proxy.tallwood.workers.dev/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -930,6 +930,15 @@ const attachSummary = (r) => `${r.done ? `Attached ${r.done} file${r.done === 1 
 // The same pop-up also picks a folder ("pick" mode, used for "Save Attachments to"): it lists folders only, can make a new folder, and hands the choice back.
 let brRun = 0, brStack = [], brPicked = new Map(), brDone = new Set(), brMode = "attach", brPickCb = null, brSubs = [];
 const brLabel = () => brStack.map((f) => f.name).join(" / ");
+// The folder being viewed, shortened to ".../ 4. Structural" (the job's top level shows the job name).
+const brShort = () => (brStack.length < 2 ? (brStack[0] ? brStack[0].name : "") : `.../ ${brStack[brStack.length - 1].name}`);
+// Opens a job folder in the Wunderbuild web app (new browser window).
+function openInWB(folderId) {
+  if (!job) return;
+  const url = `https://preview.wunderbuild.com/jobs/${encodeURIComponent(job._id)}/documents${folderId ? `/${encodeURIComponent(folderId)}` : ""}`;
+  try { if (!window.open(url, "_blank", "noopener")) throw new Error("blocked"); }
+  catch (e) { brSay("Could not open Wunderbuild from here. Open the job in Wunderbuild and look for this folder.", "err"); }
+}
 function brSay(msg, cls) { $("brStatus").textContent = msg || ""; $("brStatus").className = cls || ""; }
 function brUpdate() {
   const n = brPicked.size, pick = brMode === "pick";
@@ -942,7 +951,7 @@ function closeBrowse() { brRun++; $("browse").hidden = true; brPicked = new Map(
 async function browseLoad() {
   const run = ++brRun, forJob = job, top = brStack[brStack.length - 1];
   if (!forJob) return closeBrowse();
-  $("brPath").textContent = brLabel(); $("brFolders").textContent = ""; $("brFiles").textContent = ""; brUpdate();
+  const bp = $("brPath"); bp.textContent = brMode === "pick" ? `📁 ${brShort()}` : brShort(); bp.title = brLabel(); bp.className = brMode === "pick" ? "cur" : ""; $("brFolders").textContent = ""; $("brFiles").textContent = ""; brUpdate();
   brSay("Loading…", "busy");
   try {
     const [detail, docs] = await Promise.all([
@@ -956,7 +965,11 @@ async function browseLoad() {
     for (const f of subs) {
       const b = document.createElement("button"); b.type = "button"; b.className = "brFolder"; b.textContent = `📁 ${f.name}`;
       b.addEventListener("click", () => { if (!sending) { brStack.push({ id: f._id, name: f.name }); browseLoad(); } });
-      $("brFolders").appendChild(b);
+      const wrap = document.createElement("div"); wrap.className = "brRow"; wrap.appendChild(b);
+      const op = document.createElement("button"); op.type = "button"; op.className = "sec brOpen"; op.textContent = "Open";
+      op.setAttribute("aria-label", `Open ${f.name} in Wunderbuild`); op.title = "Open this folder in Wunderbuild";
+      op.addEventListener("click", (e) => { e.stopPropagation(); openInWB(f._id); });
+      wrap.appendChild(op); $("brFolders").appendChild(wrap);
     }
     for (const d of docs) {
       const row = document.createElement("div"); row.className = "att";
