@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.126"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.127"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://wb-proxy.tallwood.workers.dev/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -951,7 +951,7 @@ function closeBrowse() { brRun++; $("browse").hidden = true; brPicked = new Map(
 async function browseLoad() {
   const run = ++brRun, forJob = job, top = brStack[brStack.length - 1];
   if (!forJob) return closeBrowse();
-  const bp = $("brPath"); bp.textContent = brMode === "pick" ? `📁 ${brShort()}` : brShort(); bp.title = brLabel(); bp.className = brMode === "pick" ? "cur" : ""; $("brFolders").textContent = ""; $("brFiles").textContent = ""; brUpdate();
+  const bp = $("brPath"); const pk = brMode === "pick"; bp.textContent = pk ? "" : brShort(); bp.title = brLabel(); $("brCur").hidden = !pk; $("brCur").textContent = `📁 ${brShort()}`; $("brCur").title = brLabel(); $("brFolders").textContent = ""; $("brFiles").textContent = ""; brUpdate();
   brSay("Loading…", "busy");
   try {
     const [detail, docs] = await Promise.all([
