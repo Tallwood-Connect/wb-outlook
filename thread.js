@@ -314,14 +314,14 @@
     const kids = new Map(order.map((e) => [e.id, []]));
     const roots = [];
     for (const e of order) { const p = parent.get(e.id); (p ? kids.get(p.id) : roots).push(e); }
-    const draw = (e, depth) => { // a message, then whatever answered it
-      let h = entryHtml(e, linkFor);
-      const k = kids.get(e.id);
+    const draw = (e, depth) => { // whatever answered a message first (the newest replies at the top), then the message itself
+      let h = "";
+      const k = kids.get(e.id), rev = k.slice().reverse();
       if (k.length === 1) h += draw(k[0], depth);
-      else for (const c of k) h += `<div style="margin:0 0 6px 10px;padding-left:14px;border-left:3px solid ${LINES[(depth + k.indexOf(c)) % LINES.length]}">${draw(c, depth + 1)}</div>`;
-      return h;
+      else for (const c of rev) h += `<div style="margin:0 0 6px 10px;padding-left:14px;border-left:3px solid ${LINES[(depth + k.indexOf(c)) % LINES.length]}">${draw(c, depth + 1)}</div>`;
+      return h + entryHtml(e, linkFor);
     };
-    const { html: body, css: picCss } = dedupePictures(roots.map((r) => draw(r, 0)).join(""));
+    const { html: body, css: picCss } = dedupePictures(roots.slice().reverse().map((r) => draw(r, 0)).join(""));
     const first = order.length ? fmtWhen(order[0].at).replace(/, \d+:\d+ [ap]m$/i, "") : "", last = order.length ? fmtWhen(order[order.length - 1].at).replace(/, \d+:\d+ [ap]m$/i, "") : "";
     const branched = [...kids.values()].some((k) => k.length > 1);
     return `<!doctype html><html><head><meta charset="utf-8">` +
@@ -334,7 +334,7 @@
       `<body style="margin:0"><div style="font:13px Arial,Helvetica,sans-serif;border-bottom:2px solid #333;padding-bottom:8px;margin-bottom:16px">` +
       `<div style="font-size:11px;letter-spacing:1px;color:#777;text-transform:uppercase">Email conversation</div>` +
       `<div style="font-size:19px;font-weight:bold;margin:2px 0 4px">${esc(meta.subject || "(No subject)")}</div>` +
-      `<div style="color:#555">${order.length} message${order.length === 1 ? "" : "s"} · ${esc(first)}${first !== last ? " to " + esc(last) : ""} · oldest first${branched ? " · indented lines show separate branches of replies" : ""}</div>` +
+      `<div style="color:#555">${order.length} message${order.length === 1 ? "" : "s"} · ${esc(last)}${first !== last ? " back to " + esc(first) : ""} · newest first${branched ? " · indented lines show separate branches of replies" : ""}</div>` +
       (topLink ? `<div style="margin-top:3px"><a href="${esc(topLink)}" style="color:#1A5FB4">Open this job's correspondence in Wunderbuild</a></div>` : "") + `</div>` +
       body + `</body></html>`;
   }
