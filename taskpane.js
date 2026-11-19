@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.119"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.120"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://wb-proxy.tallwood.workers.dev/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -2379,7 +2379,7 @@ $("wbFill").addEventListener("click", async () => {
     });
     say(`Done: ${made} made, ${failed} failed. Now run the Wunderbuild Tests on this job.`);
   } catch (e) { say(`Stopped: ${e.message}`); }
-  finally { sending = false; lockUI(false); $("wbFill").disabled = $("wbUnfill").disabled = $("wbTests").disabled = false; refreshSend(); }
+  finally { sending = false; lockUI(false); $("wbFill").disabled = $("wbUnfill").disabled = $("wbTests").disabled = false; setStatus(""); refreshSend(); }
 });
 $("wbUnfill").addEventListener("click", async () => {
   const out = $("wbTestsOut"), say = (m) => { out.textContent += m + "\n"; diag("test", m); };
@@ -2395,7 +2395,7 @@ $("wbUnfill").addEventListener("click", async () => {
     await inPool(mine, 2, async (d) => { if (await removeOrJot(jobId, d._id)) gone++; else left++; });
     say(`Done: ${gone} removed${left ? `, ${left} could not be removed just now (they will be removed at the next save to this job)` : ""}.`);
   } catch (e) { say(`Stopped: ${e.message}`); }
-  finally { sending = false; lockUI(false); $("wbFill").disabled = $("wbUnfill").disabled = $("wbTests").disabled = false; refreshSend(); }
+  finally { sending = false; lockUI(false); $("wbFill").disabled = $("wbUnfill").disabled = $("wbTests").disabled = false; setStatus(""); refreshSend(); }
 });
 
 /* ---------- init ---------- */
