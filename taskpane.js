@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.115"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.116"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://wb-proxy.tallwood.workers.dev/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -1278,6 +1278,13 @@ async function listDocs(jobId, folderId, low) {
   return out;
 }
 
+// One call for a whole folder when the dev test on this computer showed Wunderbuild's folder detail to be complete; otherwise the normal paged listing.
+async function listFolderDocs(jobId, folderId, low) {
+  if (folderId && store.get("wb_folderdocs") === "1") {
+    try { const d = await api(`/documents/job/${jobId}/folders/${folderId}`, low ? { low: true } : {}); if (Array.isArray(d.documents)) return d.documents.filter((x) => !x.isDeleted); } catch { /* the normal listing follows */ }
+  }
+  return listDocs(jobId, folderId, low);
+}
 // Looks in the folder the email will be saved to, and in Correspondence, plus each one's "Outlook Files" folder.
 async function findExisting(forJob, destFolderId, id, corrOnly) {
   const corr = findNamedOption($("folder").options, "Correspondence");
@@ -1285,8 +1292,8 @@ async function findExisting(forJob, destFolderId, id, corrOnly) {
   const folders = corrOnly ? [corr ? corr.value : destFolderId] : [...new Set([destFolderId, corr ? corr.value : destFolderId])];
   const lists = await Promise.all(folders.map(async (f) => {
     const outlookId = await findOutlookFolderId(f, forJob._id);
-    if (corrOnly) return outlookId ? listDocs(forJob._id, outlookId) : [];
-    const [docs, inOutlook] = await Promise.all([listDocs(forJob._id, f), outlookId ? listDocs(forJob._id, outlookId) : []]); // both folders at the same time
+    if (corrOnly) return outlookId ? listFolderDocs(forJob._id, outlookId) : [];
+    const [docs, inOutlook] = await Promise.all([listDocs(forJob._id, f), outlookId ? listFolderDocs(forJob._id, outlookId) : []]); // both folders at the same time
     return [...docs, ...inOutlook];
   }));
   const all = lists.flat(), hits = all.filter((d) => (d.name || "").includes(`[${id}]`));
@@ -1320,6 +1327,23 @@ async function indexJobEmails(jobId) {
   return Object.keys(ids).length;
 }
 function rememberSaved(id, jobId, savedMs) { notSavedAt.delete(id + "_" + jobId); store.set(savedMarkKey(id, jobId), JSON.stringify({ at: Date.now(), saved: savedMs || Date.now() })); }
+// The Worker (when it has its D1 database) keeps a shared list of saved emails, so an email a colleague saved shows as saved straight away.
+// Only the job id and the add-in's own random reference are sent. Any problem (older Worker, no database, offline) is ignored: Wunderbuild stays the truth.
+const workerRoot = () => base().replace(/\/api\/?$/, "");
+let sharedListOff = false; // the Worker has no database (501): not asked again until the panel is reopened
+async function workerSavedAt(jobId, id) { // when the email was saved (ms), or 0
+  if (sharedListOff || /\/\/api\.wunderbuild\.com/i.test(base())) return 0;
+  try {
+    const r = await fetch(workerRoot() + "/saved/check", { method: "POST", headers: { "x-api-key": $("key").value.trim(), "Content-Type": "application/json" }, body: JSON.stringify({ job: jobId, refs: [id] }), signal: AbortSignal.timeout(3000) });
+    if (r.status === 501) sharedListOff = true;
+    if (!r.ok) return 0;
+    const d = await r.json(); return (d && d.saved && Number(d.saved[id])) || 0;
+  } catch { return 0; }
+}
+function shareSaved(id, jobId) {
+  if (sharedListOff || /\/\/api\.wunderbuild\.com/i.test(base())) return;
+  try { fetch(workerRoot() + "/saved", { method: "POST", headers: { "x-api-key": $("key").value.trim(), "Content-Type": "application/json" }, body: JSON.stringify({ job: jobId, ref: id }), signal: AbortSignal.timeout(5000) }).catch(() => {}); } catch { /* ignore */ }
+}
 function forgetSaved(id, jobId) { store.remove(savedMarkKey(id, jobId)); }
 
 let dupRun = 0, justSaved = null; // justSaved = id of the job this email was just saved to
@@ -1332,7 +1356,12 @@ async function checkDuplicate() {
   // no "already saved" note straight after saving it
   const id = await emailId(item);
   if (run !== dupRun || job !== forJob) return;
-  const mem = readSavedMark(id, forJob._id);
+  let mem = readSavedMark(id, forJob._id);
+  if (!mem) { // not known on this computer: a colleague may have saved it, which the Worker's shared list knows
+    const ms = await workerSavedAt(forJob._id, id);
+    if (run !== dupRun || job !== forJob) return;
+    if (ms) { rememberSaved(id, forJob._id, ms); mem = readSavedMark(id, forJob._id); }
+  }
   const skipScan = !mem && notSavedAt.get(id + "_" + forJob._id) > Date.now() - 10 * 60 * 1000; // looked a moment ago: not saved
   if (mem) { // saved earlier on this computer: show it straight away, confirm quietly below
     dupFound = true; savedAt = mem.saved ? new Date(mem.saved) : null;
@@ -1592,6 +1621,24 @@ async function uploadFile(name, type, bytes, folderId, jobId = job._id) {
   }
 }
 
+// Sends bytes to a signed storage address (straight from Outlook, or through the Worker when the storage site refuses the browser).
+async function storagePut(uploadUrl, type, bytes, name) {
+  const blob = new Blob([bytes], { type });
+  let put, upVia = "direct";
+  try { put = await fetch(uploadUrl, { method: "PUT", headers: { "Content-Type": type }, body: blob }); }
+  catch { upVia = "Worker"; put = await fetch(base().replace(/\/api$/, "") + "/upload", { method: "PUT", headers: { "x-api-key": $("key").value.trim(), "x-upload-url": uploadUrl, "Content-Type": type }, body: blob }); }
+  noteStorageHost(uploadUrl, upVia);
+  if (!put.ok) throw upVia === "Worker" ? await proxyFileError(put, `Saving ${name}`, (st) => `Upload of ${name} failed (${st}).`) : new Error(`Upload of ${name} failed (${put.status}).`);
+}
+// Replaces the file of an existing Wunderbuild document in place (same document, same place, no " (1)" name). Only used once the test on this
+// computer has shown that Wunderbuild does it properly (see "Run Wunderbuild Tests" in the Troubleshooter).
+async function replaceFile(jobId, docId, name, type, bytes) {
+  const doc = await api(`/documents/job/${jobId}/${docId}`, { method: "PUT", body: JSON.stringify({ newFile: true, name, type, size: bytes.length }) });
+  if (!doc || !doc.uploadUrl) throw new Error("Wunderbuild did not return an upload URL for the replacement file.");
+  await storagePut(doc.uploadUrl, type, bytes, name);
+  return Object.assign({}, doc, { _id: doc._id || docId });
+}
+const INPLACE_KEY = "wb_inplace", FOLDERDOC_KEY = "wb_folderdocs";
 // Finds (or creates) a sub-folder called "Outlook Files" inside parentId (or the job root when empty).
 // A folder list fetched a moment ago answers "yes, it is there" without another request; "not there" is always checked.
 async function findOutlookFolderId(parentId, jobId = job._id) {
@@ -1874,8 +1921,16 @@ $("send").addEventListener("click", async () => {
     lap("conversation PDF read and drawn");
     let newPdfOk = false, newEmlOk = false, emlDoc = null, pdfDoc = null;
     // The PDF and the original email are saved together; a failed PDF stops everything, a failed original email is only reported.
+    let inPlaceDone = false; // the conversation PDF was replaced in its own document (only when the test on this computer showed Wunderbuild does that properly)
     const pdfJob = needPdf ? (async () => {
       if (!pdf) pdf = emailToPdf({ subject, meta, body: bodyText });
+      if (convUsed && convOld && convOld._id && store.get(INPLACE_KEY) === "1") {
+        try {
+          pdfDoc = await replaceFile(jobAtSend._id, convOld._id, pdfName, "application/pdf", pdf);
+          inPlaceDone = true; newPdfOk = true; diag("save", "conversation PDF replaced in place");
+          return;
+        } catch (e) { diag("save", `replacing in place failed (${e.message}); the old PDF is left as it was and a new file is saved instead`); }
+      }
       pdfDoc = await uploadFile(pdfName, "application/pdf", pdf, folderId, jobAtSend._id);
       newPdfOk = true;
     })() : Promise.resolve();
@@ -1893,12 +1948,12 @@ $("send").addEventListener("click", async () => {
       if (emlDoc) await removeOrJot(jobAtSend._id, emlDoc._id);
       throw pdfDone.reason;
     }
-    if (newPdfOk && needEml && !newEmlOk) { // the PDF has no reference of its own, so without the .eml a retry would save it twice: take it back
+    if (newPdfOk && needEml && !newEmlOk && !inPlaceDone) { // the PDF has no reference of its own, so without the .eml a retry would save it twice: take it back
       const removed = pdfDoc ? await removeOrJot(jobAtSend._id, pdfDoc._id) : true;
       throw new Error(`Nothing was saved because the original email could not be filed (${problems[problems.length - 1] || "unknown problem"}).${removed ? "" : " A stray PDF could not be taken back just now; it will be removed automatically the next time you save to this job."} Please try again.`);
     }
     if (convUsed && newPdfOk && pdfDoc) rememberConvPdf(convKeys, jobAtSend._id, pdfDoc._id);
-    if (convOld && newPdfOk && (!needEml || newEmlOk)) { // the updated conversation PDF is in, so the earlier version of it goes
+    if (convOld && newPdfOk && !inPlaceDone && (!needEml || newEmlOk)) { // the updated conversation PDF is in, so the earlier version of it goes
       const gone = await removeOrJot(jobAtSend._id, convOld._id); // a failure is remembered and retried at the next save to this job
       if (!gone) notes.push("the earlier version of the conversation PDF could not be removed just now; it will be removed at the next save");
       await fixName(); // the earlier PDF is gone, so the name is free again
@@ -1907,12 +1962,13 @@ $("send").addEventListener("click", async () => {
     if (replace) { // the new copies are in, so the earlier copies of this draft can go
       { // the earlier copies of a draft go; one that cannot be removed now is remembered and removed at the next save (a note, not a problem: the new copies are saved)
         let left = 0;
-        for (const d of newPdfOk ? oldPdf : []) if (!(await removeOrJot(jobAtSend._id, d._id))) left++;
-        if (newPdfOk && priorPdf && !oldPdf.some((d) => d._id === priorPdf)) if (!(await removeOrJot(jobAtSend._id, priorPdf))) left++;
+        const keepId = inPlaceDone && pdfDoc ? pdfDoc._id : ""; // the conversation PDF that was just replaced in its own document is never removed
+        for (const d of newPdfOk ? oldPdf : []) if (d._id !== keepId && !(await removeOrJot(jobAtSend._id, d._id))) left++;
+        if (newPdfOk && priorPdf && priorPdf !== keepId && !oldPdf.some((d) => d._id === priorPdf)) if (!(await removeOrJot(jobAtSend._id, priorPdf))) left++;
         for (const d of newEmlOk ? oldEml : []) if (!(await removeOrJot(jobAtSend._id, d._id))) left++;
         if (left) notes.push(`${left} earlier saved cop${left === 1 ? "y" : "ies"} could not be removed just now; ${left === 1 ? "it" : "they"} will be removed at the next save`);
       }
-      if (newPdfOk && (priorPdf || oldPdf.length)) await fixName();
+      if (newPdfOk && !inPlaceDone && (priorPdf || oldPdf.length)) await fixName();
     }
 
     // Attachments were started earlier (while the PDF was being drawn); here they are waited for. Reported in their original order.
@@ -1926,7 +1982,7 @@ $("send").addEventListener("click", async () => {
     if (snap.compose && snap.wbId) store.set(sentKey(snap.subject, snap.to), JSON.stringify({ at: Date.now(), id: snap.wbId })); // so the sent copy is recognised as saved
     saveConvRecord(convId, jobAtSend);
     rememberAddrJob(snap, jobAtSend._id);
-    if (id) rememberSaved(id, jobAtSend._id);
+    if (id) { rememberSaved(id, jobAtSend._id); shareSaved(id, jobAtSend._id); }
     if (snap.compose) saveReplyRecord(convId, jobAtSend);
     if (snap.compose && pdfDoc && !convUsed) snap.pdfRef = `${jobAtSend._id}:${pdfDoc._id}`; // so the next save of this draft can replace this PDF
     await markSaved(snap);
@@ -2249,6 +2305,54 @@ $("diagCopy").addEventListener("click", async () => {
   if (!ok) $("diagOut").hidden = false;
 });
 
+// Dev-only tests of two things Wunderbuild may or may not do, run on a job the person has chosen (a small test file is made there and removed).
+// A passing result switches the matching speed-up on for this computer only; a failing one leaves the add-in doing what it always did.
+$("wbTests").addEventListener("click", async () => {
+  const out = $("wbTestsOut"), say = (m) => { out.textContent += m + "\n"; diag("test", m); };
+  out.textContent = "";
+  if (!job) { out.textContent = "Choose a test job first: a small test file appears in its top level for a moment and is then removed."; return; }
+  if (sending) return;
+  sending = true; lockUI(true); $("wbTests").disabled = true;
+  const jobId = job._id; let testDoc = null;
+  try {
+    say(`Job: ${job.name}`);
+    const name = `wb-addin-test ${Date.now()} (delete me).txt`;
+    testDoc = await uploadFile(name, "text/plain", new TextEncoder().encode("first version"), "", jobId);
+    say(`Test 1, replacing a file in place. Test file made (document ${testDoc._id}).`);
+    let ok1 = false;
+    try {
+      const rep = await replaceFile(jobId, testDoc._id, name, "text/plain", new TextEncoder().encode("second version, longer"));
+      const info = await api(`/documents/job/${jobId}/${testDoc._id}/download-url`);
+      const text = new TextDecoder().decode(await fetchBytes(info.url));
+      const copies = (await listDocs(jobId, "", true)).filter((d) => String(d.name || "").startsWith("wb-addin-test")).length;
+      say(`  Replace answered with ${rep._id === testDoc._id ? "the same" : "a DIFFERENT"} document id. The file now reads "${text.slice(0, 40)}". Test files in the job's top level: ${copies} (1 expected).`);
+      ok1 = rep._id === testDoc._id && text === "second version, longer" && copies === 1;
+    } catch (e) { say(`  Replace failed: ${e.message}`); }
+    store.set(INPLACE_KEY, ok1 ? "1" : "0");
+    say(ok1 ? "RESULT 1: PASS. Replacing in place is now ON for this computer (the conversation PDF keeps its document, its place and its name)." : "RESULT 1: not switched on. The add-in keeps saving a new file and removing the old one.");
+    say("Test 2, is a folder's detail complete? ");
+    try {
+      const tree = await folderTree(jobId);
+      const f = tree.find((x) => /correspondence \/ outlook files$/i.test(x.path)) || tree.find((x) => /(^|\/ )correspondence$/i.test(x.path)) || tree.find((x) => x.id);
+      if (!f) say("  This job has no folders to test with.");
+      else {
+        const detail = await api(`/documents/job/${jobId}/folders/${f.id}`);
+        const listed = await listDocs(jobId, f.id, true);
+        const dd = Array.isArray(detail.documents) ? detail.documents.filter((d) => !d.isDeleted) : null;
+        say(`  Folder "${f.path}": its detail lists ${dd ? dd.length + " documents" : "no documents"}; the normal listing finds ${listed.length}. Detail fields: ${Object.keys(detail).join(", ")}.`);
+        const names = new Set(listed.map((d) => d.name)), sameNames = !!dd && dd.slice(0, 8).every((d) => names.has(d.name));
+        const complete = !!dd && dd.length === listed.length && sameNames;
+        if (complete && listed.length > 100) { store.set(FOLDERDOC_KEY, "1"); say("RESULT 2: PASS. The folder detail is complete past 100 files, so the saved-emails folder is read in one call on this computer."); }
+        else { store.set(FOLDERDOC_KEY, "0"); say(complete ? "RESULT 2: matches, but this folder has 100 files or fewer, so a cap cannot show. Choose a job whose Correspondence / Outlook Files folder has over 100 files and run it again. Not switched on." : "RESULT 2: not switched on (the detail does not match the normal listing)."); }
+      }
+    } catch (e) { say(`  Folder test failed: ${e.message}`); }
+  } catch (e) { say(`Could not run the tests: ${e.message}`); }
+  finally {
+    if (testDoc && testDoc._id) { const gone = await removeOrJot(jobId, testDoc._id); say(gone ? "Test file removed." : "The test file could not be removed just now; it will be removed at the next save to this job."); }
+    sending = false; lockUI(false); $("wbTests").disabled = false; refreshSend();
+  }
+});
+
 /* ---------- init ---------- */
 $("name").addEventListener("input", () => { nameEdited = true; refreshSend(); });
 // The automatic handler (launchevent.js) fills in emails from Publish to Wunderbuild; it reads these settings,
@@ -2372,6 +2476,7 @@ Office.onReady(async () => {
   loadPrefs();
   if (!$("key").value) $("settings").open = true;
   else syncRoamingApi();
+  $("wbTests").hidden = !/\/dev\//.test(location.pathname); // the two Wunderbuild tests are for the dev copy only
   applyMode();
   // The pane stays open while other items are selected, and the same pane can show a received email or an email
   // being written (e.g. an inline reply), so the mode is re-checked every time the item changes.
