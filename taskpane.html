@@ -6,7 +6,7 @@
 <meta http-equiv="Content-Security-Policy" content="object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>Send to Wunderbuild</title>
 <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
-<script src="channel.js?v=1.114"></script>
+<script src="channel.js?v=1.115"></script>
 <style>
   :root{--ink:#0f2438;--muted:#5a6b7a;--line:#d3dce4;--bg:#fff;--soft:#f1f5f8;--brand:#2b976f;--accent:#1d7a57;--bad:#a4262c;--ok:#1d7a57;--navy:#0f2438}
   @media (prefers-color-scheme:dark){:root{--ink:#e6edf3;--muted:#98a9b8;--line:#2a3f54;--bg:#0b1a28;--soft:#12283b;--brand:#2b976f;--accent:#4fc59a;--bad:#f1707b;--ok:#4fc59a;--navy:#08141f}}
@@ -124,14 +124,14 @@
 })();
 </script>
 
-<h1>Send to Wunderbuild <span id="ver" data-v="1.114"></span></h1>
+<h1>Send to Wunderbuild <span id="ver" data-v="1.115"></span></h1>
 
 <details id="settings">
   <summary>API Settings</summary>
   <label for="key">API Key (or Proxy Access Token)</label>
   <input id="key" type="password" autocomplete="off" placeholder="Paste your key or access token">
-  <label for="base">API Base URL (Proxy Address Ending /api)</label>
-  <input id="base" type="url" value="https://api.wunderbuild.com/api">
+  <label for="base">API Base URL (Advanced: Leave as It Is)</label>
+  <input id="base" type="url" value="https://wb-proxy.tallwood.workers.dev/api">
   <label class="chk"><input type="checkbox" id="fmtPdf" checked> Formatted PDF (Rendered by the Cloudflare Worker)</label>
   <label class="chk"><input type="checkbox" id="convPdf" checked> One PDF per Email Conversation (Beta): later emails in the same conversation are added to the same PDF</label>
   <div class="btns">
@@ -231,8 +231,8 @@
   <button type="button" class="sec" id="brGo" disabled>Attach Selected</button>
 </div>
 
-<script src="pdf.js?v=1.114"></script>
-<script src="eml.js?v=1.114"></script>
-<script src="taskpane.js?v=1.114"></script>
+<script src="pdf.js?v=1.115"></script>
+<script src="eml.js?v=1.115"></script>
+<script src="taskpane.js?v=1.115"></script>
 </body>
 </html>

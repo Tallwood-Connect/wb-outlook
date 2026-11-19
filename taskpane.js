@@ -1,6 +1,6 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.114"; // bump with every change sent to GitHub; must match data-v in taskpane.html
-const DEFAULT_BASE = "https://api.wunderbuild.com/api";
+const APP_VERSION = "1.115"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const DEFAULT_BASE = "https://wb-proxy.tallwood.workers.dev/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
 const OLD_WORKER_HOST = "wb-proxy.jason-984.workers.dev", NEW_WORKER_HOST = "wb-proxy.tallwood.workers.dev";
@@ -16,7 +16,7 @@ const store = {
 // Removes every saved item whose name matches the test.
 const purge = (test) => store.keys().filter(test).forEach((k) => store.remove(k));
 // A short record of what the add-in did and what went wrong, for the troubleshooting report (never holds the key).
-const DIAG_KEY = "wb_diag_log", DIAG_MAX = 60;
+const DIAG_KEY = "wb_diag_log", DIAG_MAX = 120;
 let diagLog = [];
 try { diagLog = JSON.parse(store.get(DIAG_KEY) || "[]").slice(-DIAG_MAX); } catch { diagLog = []; }
 function diag(kind, msg) {
@@ -437,6 +437,33 @@ function matchJobs(subject, jobs) {
   return jobs.map((j) => ({ j, s: scoreJob(S, j) })).filter((x) => x.s >= 50).sort((a, b) => b.s - a.s);
 }
 
+// Jobs are also suggested from the people on an email: each save remembers, on this computer only, which job went with each outside address
+// (never your own company's addresses). The suggestions are offered for you to pick; they are never chosen automatically.
+const ADDR_KEY = "wb_addr_jobs";
+function outsideAddrs(snap) {
+  let mine = ""; try { mine = String(Office.context.mailbox.userProfile.emailAddress || "").toLowerCase().split("@")[1] || ""; } catch { /* unknown */ }
+  const out = new Set();
+  for (const p of [snap && snap.from, ...((snap && snap.to) || []), ...((snap && snap.cc) || [])]) {
+    const a = String((p && p.emailAddress) || "").toLowerCase().trim();
+    if (/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(a) && (!mine || a.split("@")[1] !== mine)) out.add(a);
+  }
+  return [...out];
+}
+function readAddrJobs() { try { return JSON.parse(store.get(ADDR_KEY) || "{}") || {}; } catch { return {}; } }
+function rememberAddrJob(snap, jobId) {
+  try {
+    const m = readAddrJobs();
+    for (const a of outsideAddrs(snap)) { const e = m[a] || { at: 0, j: {} }; e.j[jobId] = (e.j[jobId] || 0) + 1; e.at = Date.now(); m[a] = e; }
+    const keep = Object.keys(m).sort((x, y) => m[y].at - m[x].at).slice(0, 400), out = {}; for (const k of keep) out[k] = m[k];
+    store.set(ADDR_KEY, JSON.stringify(out));
+  } catch { /* a convenience only */ }
+}
+function suggestJobsByPeople(snap, jobs) {
+  const m = readAddrJobs(), score = new Map();
+  for (const a of outsideAddrs(snap)) { const e = m[a]; if (e) for (const [j, n] of Object.entries(e.j)) score.set(j, (score.get(j) || 0) + n); }
+  const byId = new Map((jobs || []).map((j) => [j._id, j]));
+  return [...score.entries()].sort((x, y) => y[1] - x[1]).map(([j]) => byId.get(j)).filter(Boolean).slice(0, 3);
+}
 let matchRun = 0;
 let jobAuto = false; // true while the chosen job was filled in from the subject (so a changed subject may replace it)
 async function autoMatch() {
@@ -452,7 +479,9 @@ async function autoMatch() {
     note.className = ""; note.textContent = "";
     const m = matchJobs(item.subject, jobs);
     if (!m.length) {
-      note.textContent = "No job matched this subject. Search for the job above.";
+      const people = suggestJobsByPeople(item, jobs);
+      if (people.length) { renderJobList(people); note.textContent = "No job matched the subject. Jobs you saved before for the people on this email (pick one):"; }
+      else note.textContent = "No job matched this subject. Search for the job above.";
       return;
     }
     const [top, second] = m;
@@ -500,6 +529,7 @@ async function chooseJob(j) {
   $("chosenText").textContent = `${fullJobNo(j) ? fullJobNo(j) + " " : ""}${j.name}`; $("chosen").hidden = false; $("q").hidden = true; $("convFound").hidden = true;
   refreshSend();
   await loadFolders();
+  untickSavedAttachments(); // quietly, in the background
   if (subjectPrefixOn()) await applySubjectPrefix(); // after the folders, so a problem message is not wiped by them
 }
 
@@ -1132,10 +1162,9 @@ async function buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId, d
   const add = (d) => { if (d && d._id && !seen.has(d._id) && !d.isDeleted) { seen.add(d._id); cands.push(d); } };
   const probe = mkEntry(T.trim(bodyHtml, null));
   const remembered = [...new Set([...T.threadKeys(probe), ...(probe.convId ? ["conv:" + probe.convId] : [])].map((k) => { try { const r = JSON.parse(store.get(CPDF_PREFIX + hash40(k)) || "null"); return r && r.j === jobId && r.d ? r.d : ""; } catch { return ""; } }).filter(Boolean))];
-  (await Promise.all(remembered.map((d) => api(`/documents/job/${jobId}/${d}`).catch((e) => { // gone or not readable: ignored, and forgotten so it is not asked about again
-    if (/returned (400|404)\b/.test(String(e && e.message))) for (const k of Object.keys(localStorage)) { if (k.startsWith(CPDF_PREFIX)) { try { if (JSON.parse(localStorage.getItem(k)).d === d) localStorage.removeItem(k); } catch { /* ignore */ } } }
-    return null;
-  })))).forEach((doc) => { if (doc && doc._id) add(doc); });
+  // A remembered PDF is asked for its download address straight away (no separate look-up first: one Wunderbuild wait saved). Its name comes with that answer.
+  const forget = (d) => { for (const k of Object.keys(localStorage)) { if (k.startsWith(CPDF_PREFIX)) { try { if (JSON.parse(localStorage.getItem(k)).d === d) localStorage.removeItem(k); } catch { /* ignore */ } } } };
+  remembered.forEach((d) => add({ _id: d, name: "", remembered: true }));
   const tail = cleanName(T.normSubject(subject)).trim().toLowerCase();
   (docs || []).filter((d) => isPdfDoc(d))
     .map((d) => ({ d, m: /^\d{4}-\d{2}-\d{2} - (.*?)(?: \(\d+\))?\.pdf$/i.exec(d.name || "") }))
@@ -1154,9 +1183,13 @@ async function buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId, d
   const reads = await Promise.all(cands.slice(0, 8).map(async (d) => {
     try {
       const info = await api(`/documents/job/${jobId}/${d._id}/download-url`);
+      if (!d.name) d.name = info.name || "";
       const m = await T.unpackMeta(await fetchBytes(info.url), L);
       return m ? { d, m } : null;
-    } catch { return null; } // not readable: the others are tried
+    } catch (e) { // not readable: the others are tried (a remembered PDF that is gone is forgotten, so it is not asked about again)
+      if (d.remembered && /returned (400|404)\b/.test(String(e && e.message))) forget(d._id);
+      return null;
+    }
   }));
   for (const r of reads) {
     if (!r) continue;
@@ -1253,8 +1286,8 @@ async function findExisting(forJob, destFolderId, id, corrOnly) {
   const lists = await Promise.all(folders.map(async (f) => {
     const outlookId = await findOutlookFolderId(f, forJob._id);
     if (corrOnly) return outlookId ? listDocs(forJob._id, outlookId) : [];
-    const docs = await listDocs(forJob._id, f);
-    return [...docs, ...(outlookId ? await listDocs(forJob._id, outlookId) : [])];
+    const [docs, inOutlook] = await Promise.all([listDocs(forJob._id, f), outlookId ? listDocs(forJob._id, outlookId) : []]); // both folders at the same time
+    return [...docs, ...inOutlook];
   }));
   const all = lists.flat(), hits = all.filter((d) => (d.name || "").includes(`[${id}]`));
   hits.all = all; // every file seen, used to keep new PDF names from clashing
@@ -1378,6 +1411,26 @@ function renderAttachments() {
   $("attMode").checked = false; // one folder for all is the standard
   syncAttMode();
   fillAttRowSelects();
+}
+// An attachment that is already in the folder it would be saved to (same name, about the same size) is un-ticked, so it is not saved twice.
+let dupAttRun = 0;
+async function untickSavedAttachments() {
+  const run = ++dupAttRun, forJob = job, folderId = $("attFolder").value;
+  if (!forJob || !currentAtts.length || $("attFolder").disabled) return;
+  try {
+    const docs = await listDocs(forJob._id, folderId, true);
+    if (run !== dupAttRun || job !== forJob) return;
+    const have = new Map(); for (const d of docs) have.set(String(d.name || "").toLowerCase(), d.size || 0);
+    [...$("attList").children].forEach((row, i) => {
+      const a = currentAtts[i], cb = row.children[0], sz = row.children[2];
+      if (!a || !cb || cb.dataset.dupNoted) return;
+      const size = have.get(finalName(row.children[1].value, a.name || "attachment").toLowerCase());
+      if (size === undefined || Math.abs(size - (a.size || 0)) > Math.max(2048, (a.size || 0) * 0.03)) return;
+      cb.checked = false; cb.dataset.def = "false"; cb.dataset.dupNoted = "1"; // "Save Attachments Only" will not tick it again either
+      if (sz) sz.textContent = `${sz.textContent} · already in this folder`;
+    });
+    refreshSend();
+  } catch { /* only a convenience: the attachments stay ticked */ }
 }
 // Every attachment's folder list is a copy of the "Save attachments to" list.
 function fillAttRowSelects() {
@@ -1650,6 +1703,7 @@ function markSaved(snap) { // lets the send-time prompt know this draft has been
 }
 
 $("folder").addEventListener("change", () => { if (job && !sending) checkDuplicate(); });
+$("attFolder").addEventListener("change", () => { if (job && !sending) untickSavedAttachments(); });
 for (const id of ["folder", "attFolder"]) { $(id).addEventListener("mousedown", () => refreshFolders("folder box opened")); $(id).addEventListener("focus", () => refreshFolders("folder box opened")); }
 
 // Which email Outlook has open right now (received emails only). Used to stop a save that started on one email from reading another.
@@ -1734,15 +1788,19 @@ $("send").addEventListener("click", async () => {
     if (!snap.compose && id) { // two people saving the same email at the same moment: the second waits, then finds the first copy and saves nothing twice
       emailLock = await acquireConvLock(`${jobAtSend._id}:email:${id}`, "this email");
     }
+    // Both locks are taken before anything is listed (always in the same order: this email, then its conversation), so the folders are read only once, while nobody else can change them.
+    const convKey = `${jobAtSend._id}:${hash40(window.WBThread ? window.WBThread.subjectKey(subject) : String(subject))}`;
+    let lockedEarly = false;
+    if (convOn && (snap.compose || forceResave || !dupFound)) { convLock = await acquireConvLock(convKey); lockedEarly = !!convLock; }
     if (!snap.compose || snap.savedBefore) { // a brand new email has no earlier copy, so the check is skipped
       try { setStatus("Checking for an existing copy…", "busy"); existing = await findExisting(jobAtSend, folderId, id); }
       catch (e) { problems.push(`could not check for an existing copy (${e.message})`); }
     }
-    lap("locks and already-saved check");
-    const oldPdf = existing.filter(isPdfDoc), oldEml = existing.filter(isEmlDoc);
+    lap("locks and already-saved check");    const oldPdf = existing.filter(isPdfDoc), oldEml = existing.filter(isEmlDoc);
     const replace = snap.compose || forceResave; // a draft is saved afresh each time, so the saved copy always matches what is sent
     const needPdf = replace || !(oldPdf.length || oldEml.length), needEml = replace || !oldEml.length; // the PDF has a clean name, so a saved .eml means its PDF is saved too; // a received email only fills in what is missing
     const duplicate = !needPdf && !needEml;
+    if (lockedEarly && !needPdf) { releaseConvLock(convLock); convLock = null; lockedEarly = false; } // no PDF to write: nobody needs to wait for this save
     const fileBase = `${baseName} [${id}]`; // only the .eml (in "Outlook Files") carries the reference; the PDF keeps a clean name
     // an earlier PDF of this same draft (its Wunderbuild id is kept on the draft) is replaced, so it does not count as a name clash
     let priorPdf = null;
@@ -1788,8 +1846,8 @@ $("send").addEventListener("click", async () => {
       } catch (e) { notes.push(`the PDF could not be renamed to ${pdfName} (${e.message})`); } // the file is saved; only its name differs, so this is a note and not a problem
     };
     if (convOn && needPdf) {
-      convLock = await acquireConvLock(`${jobAtSend._id}:${hash40(window.WBThread ? window.WBThread.subjectKey(subject) : String(subject))}`); // throws if someone else is updating it
-      if (convLock) { // someone may have replaced the conversation PDF while this save was waiting: look at the folder again, now that nobody else can change it
+      if (!convLock) convLock = await acquireConvLock(convKey); // throws if someone else is updating it (already held when taken before the check)
+      if (convLock && !lockedEarly) { // someone may have replaced the conversation PDF while this save was waiting: look at the folder again, now that nobody else can change it
         try { setStatus("Checking the folder again…", "busy"); nameDocs = await listDocs(jobAtSend._id, folderId); pdfName = uniquePdfName(nameDocs); }
         catch (e) { diag("save", `folder not re-read after the lock: ${e.message}`); }
       }
@@ -1798,7 +1856,7 @@ $("send").addEventListener("click", async () => {
         setStatus("Adding this email to its conversation PDF…", "busy");
         const r = await buildConversationPdf({ snap, subject, bodyHtml, inl, id, jobId: jobAtSend._id, docs: nameDocs, outlookFolderId, emlName, topLink: wbLink(jobAtSend._id, folderId), exactPics, emlBytes: snap.compose ? null : eml });
         pdf = r.bytes; convOld = r.old; convUsed = true; convKeys = r.keys;
-        if (r.old) pdfName = r.old.name; // the conversation PDF keeps its name
+        if (r.old && r.old.name) pdfName = r.old.name; // the conversation PDF keeps its name
         diag("save", `conversation PDF: ${r.count} message(s)${r.old ? ", replacing the earlier one" : ", new"}`);
       } catch (e) {
         diag("save", `conversation PDF not used: ${e && e.message}`);
@@ -1867,6 +1925,7 @@ $("send").addEventListener("click", async () => {
     // Remember which job this conversation was filed to (kept on this computer only).
     if (snap.compose && snap.wbId) store.set(sentKey(snap.subject, snap.to), JSON.stringify({ at: Date.now(), id: snap.wbId })); // so the sent copy is recognised as saved
     saveConvRecord(convId, jobAtSend);
+    rememberAddrJob(snap, jobAtSend._id);
     if (id) rememberSaved(id, jobAtSend._id);
     if (snap.compose) saveReplyRecord(convId, jobAtSend);
     if (snap.compose && pdfDoc && !convUsed) snap.pdfRef = `${jobAtSend._id}:${pdfDoc._id}`; // so the next save of this draft can replace this PDF
