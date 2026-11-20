@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.129"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.130"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://wb-proxy.tallwood.workers.dev/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -143,6 +143,12 @@ async function api(path, opts = {}) {
       }
     }
     if (res.status === 502 || res.status === 504) throw new Error(plainError(await res.text()) || "Wunderbuild did not answer in time. Wait a minute and try again.");
+    if (res.status === 403) { // a key that lacks a permission, or a token with no Wunderbuild key behind it: say so in plain words
+      const t = plainError(await res.text());
+      if (/does not have .*access/i.test(t)) throw new Error(`Wunderbuild says this API key is missing a permission ("${t}"). Ask Jason to add it for your key (Wunderbuild, Settings, Integrations, API).`);
+      if (/isn't linked to a Wunderbuild key|could not be read/i.test(t)) throw new Error(t);
+      throw new Error(`Wunderbuild returned 403: ${t}`);
+    }
     if (!res.ok) throw new Error(res.status === 429 ? "Wunderbuild is busy (too many requests). Wait a few seconds and try again." : `Wunderbuild returned ${res.status}: ${plainError(await res.text())}`);
     return res.status === 204 ? null : res.json();
   }
@@ -2526,6 +2532,43 @@ function syncRoamingApi() {
   } catch { /* roaming settings unavailable */ }
 }
 ["key", "base"].forEach((id) => $(id).addEventListener("change", () => { store.set("wb_" + id, $(id).value.trim()); syncRoamingApi(); }));
+// ---- Setup code: a one-time code from Jason gives this PC its own token (nothing long to paste) ----
+const connNote = (msg, cls) => { $("connNote").textContent = msg || ""; $("connNote").className = cls || ""; };
+const onWorker = () => /^https:\/\//i.test(base()) && !/\/\/api\.wunderbuild\.com/i.test(base());
+$("setupGo").addEventListener("click", async () => {
+  const code = $("setupCode").value.trim();
+  if (!code) return connNote("Type or paste the setup code first.", "err");
+  if (!onWorker()) return connNote("Setup codes only work with the Worker address in API Base URL.", "err");
+  $("setupGo").disabled = true; connNote("Connecting…");
+  try {
+    const r = await fetch(workerRoot() + "/setup/redeem", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code, kind: "outlook" }), signal: AbortSignal.timeout(15000) });
+    const t = await r.text();
+    if (!r.ok) return connNote(plainError(t) || `The Worker answered ${r.status}.`, "err");
+    const d = JSON.parse(t);
+    if (!d || !d.token) return connNote("The Worker's answer was not understood. Ask Jason for a new code.", "err");
+    $("key").value = d.token; $("key").dispatchEvent(new Event("change")); // the same path as pasting a key: saved on this PC and for the automatic handler
+    $("setupCode").value = "";
+    connNote(`Connected as ${d.name}. This PC now uses your own key.`, "ok");
+    diag("setup", `connected with a setup code as ${d.name}`);
+  } catch (e) { connNote(e && (e.name === "TimeoutError" || e.name === "AbortError") ? "The Worker did not answer. Try again." : "Could not reach the Worker. Check the API Base URL and try again.", "err"); }
+  finally { $("setupGo").disabled = false; }
+});
+$("setupCode").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); $("setupGo").click(); } });
+$("testConn").addEventListener("click", async () => {
+  const key = $("key").value.trim();
+  if (!key) return connNote("Add your setup code or key first.", "err");
+  if (!onWorker()) return connNote("Test Connection needs the Worker address in API Base URL.", "err");
+  $("testConn").disabled = true; connNote("Testing…");
+  try {
+    const r = await fetch(workerRoot() + "/me?check=1", { headers: { "x-api-key": key }, signal: AbortSignal.timeout(20000) });
+    if (r.status === 401) return connNote("The Worker does not recognise this key. If Jason sent you a setup code, enter it above and press Connect.", "err");
+    if (r.status === 404) return connNote("This Worker is older and cannot test the connection.", "err");
+    if (!r.ok) return connNote(plainError(await r.text()) || `The Worker answered ${r.status}.`, "err");
+    const d = await r.json(), ok = d.wb && d.wb.status === 200;
+    connNote(`Connected as ${d.name}${d.shared ? " (the shared key)" : ""}. ${d.wb ? d.wb.note : ""}`.trim(), ok ? "ok" : "err");
+  } catch (e) { connNote("Could not reach the Worker. Check the API Base URL and try again.", "err"); }
+  finally { $("testConn").disabled = false; }
+});
 // ---- Settings dropdown: automatic subject details ----
 function loadPrefs() {
   const o = subjOpts();

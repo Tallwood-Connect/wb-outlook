@@ -6,7 +6,7 @@
 <meta http-equiv="Content-Security-Policy" content="object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>Send to Wunderbuild</title>
 <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
-<script src="channel.js?v=1.129"></script>
+<script src="channel.js?v=1.130"></script>
 <style>
   :root{--ink:#0f2438;--muted:#5a6b7a;--line:#d3dce4;--bg:#fff;--soft:#f1f5f8;--brand:#2b976f;--accent:#1d7a57;--bad:#a4262c;--ok:#1d7a57;--navy:#0f2438}
   @media (prefers-color-scheme:dark){:root{--ink:#e6edf3;--muted:#98a9b8;--line:#2a3f54;--bg:#0b1a28;--soft:#12283b;--brand:#2b976f;--accent:#4fc59a;--bad:#f1707b;--ok:#4fc59a;--navy:#08141f}}
@@ -104,7 +104,9 @@
   .grpHead{margin:12px 0 2px;font-weight:600}
   .opt{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:6px 0}
   .hint2{margin-top:4px;color:var(--muted);font-size:12px} .hint2:empty{display:none}
-  #clearNote{margin-top:6px;color:var(--muted);font-size:12px}
+  #clearNote,#connNote{margin-top:6px;color:var(--muted);font-size:12px}
+#connNote:empty{display:none}
+#setupRow{display:flex;gap:6px}#setupRow input{flex:1;min-width:0}#setupRow .sec{margin:0;flex:none}
   #clearNote:empty{display:none}
   .more{margin-top:6px;border:0;padding:0}
   .more summary{font-size:12px;color:var(--accent);width:max-content}
@@ -133,10 +135,14 @@
 })();
 </script>
 
-<h1>Send to Wunderbuild <span id="ver" data-v="1.129"></span></h1>
+<h1>Send to Wunderbuild <span id="ver" data-v="1.130"></span></h1>
 
 <details id="settings">
   <summary>API Settings</summary>
+  <label for="setupCode">Setup Code (One-Time Code from Jason)</label>
+  <div id="setupRow"><input id="setupCode" type="text" autocomplete="off" spellcheck="false" placeholder="XXXX-XXXX-XXXX-XXXX"><button type="button" class="sec" id="setupGo">Connect</button></div>
+  <button type="button" class="sec" id="testConn">Test Connection</button>
+  <div id="connNote" role="status"></div>
   <label for="key">API Key (or Proxy Access Token)</label>
   <input id="key" type="password" autocomplete="off" placeholder="Paste your key or access token">
   <label for="base">API Base URL (Advanced: Leave as It Is)</label>
@@ -248,8 +254,8 @@
   <button type="button" class="sec" id="brGo" disabled>Attach Selected</button>
 </div>
 
-<script src="pdf.js?v=1.129"></script>
-<script src="eml.js?v=1.129"></script>
-<script src="taskpane.js?v=1.129"></script>
+<script src="pdf.js?v=1.130"></script>
+<script src="eml.js?v=1.130"></script>
+<script src="taskpane.js?v=1.130"></script>
 </body>
 </html>
