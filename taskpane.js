@@ -1,5 +1,5 @@
 /* Send to Wunderbuild: Outlook task pane. Uses the Wunderbuild public API (beta). */
-const APP_VERSION = "1.130"; // bump with every change sent to GitHub; must match data-v in taskpane.html
+const APP_VERSION = "1.131"; // bump with every change sent to GitHub; must match data-v in taskpane.html
 const DEFAULT_BASE = "https://wb-proxy.tallwood.workers.dev/api";
 // The Worker moved from wb-proxy.jason-984.workers.dev to wb-proxy.tallwood.workers.dev (2026-11-04). A saved address that still
 // uses the old one is switched over (this computer and the Outlook roaming copy that the automatic handler reads).
@@ -2311,6 +2311,14 @@ async function buildReport() {
   { let ch = "(none yet)"; try { const c = JSON.parse(store.get("wb_channel") || "null"); if (c) ch = `${c.c}, decided ${Math.round((Date.now() - c.t) / 60000)} min ago`; } catch { /* ignore */ } add(`Copy: ${/\/dev\//.test(location.pathname) ? "dev" : /\/beta\//.test(location.pathname) ? "beta" : "live"} | tester check: ${ch}`); }
   add(`API: key ${key ? `set (${key.length} characters)` : "NOT SET"} | address ${base()} | host ${root} | https ${/^https:/i.test(base())}`);
   try { const rs = Office.context.roamingSettings; add(`Key copy kept in Outlook settings: ${rs.get("wb_key") ? "yes" : "no"}`); } catch { /* ignore */ }
+  add(`Token kind: ${key ? (key.indexOf("wbt_") === 0 ? "a person's own token" : "the shared token, or a pasted Wunderbuild key") : "(none)"}`);
+  { // what the automatic script (send prompt, Archicad emails) last did; it writes this trail itself (no subjects, no keys)
+    add(""); add("== AUTOMATIC SCRIPT (send prompt and Archicad review emails) ==");
+    let lg = []; try { lg = JSON.parse(store.get("wb_le_log") || "[]"); } catch { /* ignore */ }
+    if (!lg.length) add("No lines yet. The script (1.31 or newer) writes here each time Outlook starts it. None means it has not run on this computer since then, or it cannot share storage with this panel.");
+    for (const l of lg.slice(-15)) add(`${new Date(l.t).toLocaleString("en-AU", { timeZone: "Australia/Perth", hour12: false, month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" })} ${l.m}`);
+    add("");
+  }
   const keys = store.keys().filter((k) => k.startsWith("wb_")).map((k) => `${k.replace(/_[0-9a-f]{24}$/i, "_<id>")}`);
   const counts = {}; for (const k of keys) counts[k] = (counts[k] || 0) + 1;
   add(`Saved on this computer: ${Object.entries(counts).map(([k, n]) => (n > 1 ? `${k} x${n}` : k)).join(", ") || "nothing"}`);
@@ -2662,7 +2670,7 @@ function applyMode() {
 }
 
 // The newest manifest in this repo (manifest.xml, or manifest-dev.xml on the dev copy). The installed one is shown in the button's hover text; tests/manifestver.test.js keeps this in step with the files.
-const MANIFEST_VERSION = /\/dev\//.test(location.pathname) ? "1.0.0.7" : "1.0.0.19";
+const MANIFEST_VERSION = /\/dev\//.test(location.pathname) ? "1.0.0.7" : "1.0.0.20";
 Office.onReady(async () => {
   const ver = $("ver");
   ver.textContent = `v${APP_VERSION} · ${/\/dev\//.test(location.pathname) ? "dev manifest" : "latest manifest"} ${MANIFEST_VERSION}` + (ver.dataset.v === APP_VERSION ? "" : ` (taskpane.html is v${ver.dataset.v}, files out of sync)`);

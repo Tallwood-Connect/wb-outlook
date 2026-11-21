@@ -6,8 +6,17 @@
       "#wb-<code>", it fills that email in (recipients, subject, message above the Outlook signature, the
       published files attached from Wunderbuild). Every other new email is left untouched.
    Messages starting with [WB] go to the browser console, to help find problems. */
-const WB_LE_VERSION = "1.30";
-const wbLog = (m) => { try { console.log(`[WB ${WB_LE_VERSION}] ${m}`); } catch (e) { /* no console */ } };
+const WB_LE_VERSION = "1.31";
+// Every line goes to the console and also to a short trail in browser storage ("wb_le_log", last 40 lines) that the task pane's
+// Troubleshooter shows. It holds no subjects, addresses or keys. Where this script has no browser storage (classic Outlook) only the console is used.
+const wbLog = (m) => {
+  try { console.log(`[WB ${WB_LE_VERSION}] ${m}`); } catch (e) { /* no console */ }
+  try {
+    const a = JSON.parse(localStorage.getItem("wb_le_log") || "[]");
+    a.push({ t: Date.now(), m: `${WB_LE_VERSION} ${String(m).slice(0, 140)}` });
+    localStorage.setItem("wb_le_log", JSON.stringify(a.slice(-40)));
+  } catch (e) { /* no storage here */ }
+};
 wbLog("send-time script loaded");
 try { window.addEventListener("error", (e) => wbLog(`script error: ${e && e.message}`)); } catch (e) { /* not a browser page */ }
 
@@ -93,6 +102,7 @@ function wbJobSignal(subject, convId) {
 
 /* ---------- 2. Fill in an email prepared by Publish to Wunderbuild ---------- */
 const WB_MAIL_TAG = /\s*#wb-([A-Za-z0-9]{6,16})\s*$/;
+const WB_SUBJECT_TRIES = 10, WB_SUBJECT_STEP = 300; // empty subject at event time: look again every 0.3 s, up to 3 s
 const WB_MAX_ATTACH = 20 * 1024 * 1024; // same limit as the task pane
 // The API settings saved by the task pane (this page shares its storage; roaming settings are the fallback).
 function wbSetting(k) {
@@ -139,6 +149,7 @@ async function wbFetchBytes(root, key, url) {
 }
 
 function onNewMessageComposeHandler(event) {
+  wbLog("new-email event received");
   let finished = false;
   const done = (why) => {
     if (finished) return;
@@ -149,8 +160,20 @@ function onNewMessageComposeHandler(event) {
   setTimeout(() => done("stopped waiting"), 170000);
   const item = Office.context.mailbox.item;
   (async () => {
-    const subject = await wbCall((cb) => item.subject.getAsync(cb));
-    const tag = WB_MAIL_TAG.exec(subject || "");
+    let subject = await wbCall((cb) => item.subject.getAsync(cb));
+    let tag = WB_MAIL_TAG.exec(subject || "");
+    if (!tag && !String(subject || "").trim()) {
+      // A mailto: link can fill in the subject a moment after Outlook raises this event. Look again for up to 3 s, but only while the
+      // subject is still empty (any other text means this is not one of ours). This runs in the background; it never holds up typing or Send.
+      const t0 = Date.now();
+      for (let i = 0; i < WB_SUBJECT_TRIES && !tag; i++) {
+        await wbSleep(WB_SUBJECT_STEP);
+        try { subject = await wbCall((cb) => item.subject.getAsync(cb)); } catch (e) { break; }
+        tag = WB_MAIL_TAG.exec(subject || "");
+        if (String(subject || "").trim()) break;
+      }
+      wbLog(tag ? `subject arrived after ${Date.now() - t0} ms` : `subject ${String(subject || "").trim() ? "has no tag" : "still empty"} after ${Date.now() - t0} ms`);
+    }
     if (!tag) return done("not from Publish to Wunderbuild");          // every other new email: untouched
     const base = (wbSetting("wb_base") || "").trim().replace(/\/+$/, "");
     const key = (wbSetting("wb_key") || "").trim();
@@ -159,7 +182,9 @@ function onNewMessageComposeHandler(event) {
       return done("no API settings");
     }
     const root = base.replace(/\/api$/, "");
+    wbLog(`collecting ${tag[1]} from ${root.replace(/^https?:\/\//, "").split("/")[0]} with a ${key.indexOf("wbt_") === 0 ? "person" : "shared"} token`);
     const res = await fetch(`${root}/mail/${tag[1]}`, { headers: { "x-api-key": key } });
+    wbLog(`collect answered ${res.status}`);
     if (!res.ok) throw new Error(`couldn't collect the email (${res.status})`);
     const mail = await res.json();
     wbNote(item, "Publish to Wunderbuild is filling in this email…", false);

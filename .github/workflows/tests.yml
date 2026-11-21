@@ -15,5 +15,7 @@ jobs:
         run: node tests/modules.test.js
       - name: Send-time prompt rules
         run: node tests/launchevent.test.js
+      - name: Archicad review email handler (new email)
+        run: node tests/newmessage.test.js
       - name: Manifest version shown in the panel and hover text
         run: node tests/manifestver.test.js
